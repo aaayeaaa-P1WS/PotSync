@@ -1,0 +1,183 @@
+# PotSync 一起看 · PotPlayer 异地同步播放
+
+在多台有因特网连接的异地 Windows 电脑之间，同步各台机器上 **PotPlayer** 的
+**播放、暂停、进度条拖动、上一集/下一集切换**。一方操作，所有人的播放器在
+毫秒级内跟随。
+
+**单个 exe，真正点击即用**：`PotSync.exe` 内置「中继服务器 + 内网穿透」——
+主机勾选一下、点创建房间，程序自动生成公网邀请链接；好友复制链接一键加入，
+无需公网 IP、无需路由器设置、无需注册任何账号。
+
+> 📦 下载地址：[GitHub Releases 最新版](https://github.com/aaayeaaa-P1WS/PotSync/releases/latest)（软件内可一键检查更新）
+
+- 房间制：6 位房间号 + 一键复制邀请链接
+- 内网穿透：Cloudflare 免费隧道（免注册），bore.pub 自动降级兜底
+- 上下集切换全房间跟随（软件按钮，或直接在 PotPlayer 里切）
+- 首次启动一次性申请防火墙网络权限（一次 UAC 授权，之后不再弹窗）
+- 标题栏与主页展示版本号，一键检查更新（发现新版后自动下载并替换重启）
+- 兼容系统代理环境：内网地址自动直连，不支持的代理形式自动降级直连
+- 直接在 PotPlayer 里按空格 / 拖进度条也会被侦测并同步给全房间
+- 服务器时间戳补偿网络延迟；周期看门狗自动校准漂移
+- 支持 32/64 位 PotPlayer；程序本体为 64 位单文件（约 30MB，启动约 1.3s）
+
+## 目录结构
+
+```
+potplayer-sync/
+├── dist/PotSync.exe       # 打包产物：客户端 + 内置服务器 + 内网穿透（双击即用）
+├── client/
+│   ├── app.py             # 客户端入口（PyQt5）
+│   ├── main_window.py     # 界面：主页 / 房间页 / 剪贴板 / 主机模式 / 检查更新
+│   ├── relay.py           # 中继服务器核心（内嵌于 exe；也是 VPS 部署的同一份代码）
+│   ├── tunnel.py          # 内网穿透：cloudflared / bore 隧道管理、组件自动下载
+│   ├── pot_bridge.py      # PotPlayer 控制桥（Win32 窗口消息）
+│   ├── firewall.py        # 首次启动防火墙权限申请（UAC + netsh 规则）
+│   ├── updater.py         # 检查更新与自更新（多镜像断点续传 + 退出后替换重启）
+│   ├── version.py         # 版本号（唯一权威来源）
+│   ├── net_client.py      # WebSocket 客户端（ws/wss，独立线程 + 时钟偏移估算）
+│   ├── sync_engine.py     # 同步引擎（本地侦测 / 远程应用 / 漂移校准）
+│   └── resources/style.qss
+├── server/server.py       # VPS 独立部署入口（relay.py 的薄壳）
+├── tests/                 # 八组自动化测试（协议/控制桥/端到端/内嵌/隧道/GUI/防火墙/更新）
+├── tools/
+│   ├── fake_potplayer.py      # 假 PotPlayer 窗口（无真机时的联调用）
+│   ├── live_tunnel_check.py   # 真实公网隧道全链路联调
+│   └── upx/                   # UPX 压缩工具（打包用）
+├── build_client.bat       # 一键打包 dist\PotSync.exe
+└── run_server.bat / run_client.bat   # 源码方式运行
+```
+
+## 一、快速开始（主机模式 + 内网穿透，推荐）
+
+1. **首次运行**：启动后程序会弹一次 Windows 授权确认（UAC），请点击「是」。
+   这会一次性写入全部防火墙规则（本程序 + 隧道组件 + 中继端口段），
+   之后运行、当主机都不会再被防火墙弹窗打扰。若点了「否」：
+   加入别人房间不受影响；当主机建房时系统防火墙可能仍会弹窗，届时点「允许」即可。
+2. 所有人：用 PotPlayer 打开**同一个视频文件**，运行 `PotSync.exe`。
+3. 主机：勾选 **「在本机启动服务器」**（其下的「内网穿透」保持勾选）
+   → 点 **创建房间**。首次使用会自动下载隧道组件（约 50MB，仅一次，
+   存于 `C:\Users\<你>\.potsync\bin\`），随后自动建立公网隧道。
+   状态栏会显示进度；成功后服务器栏变成公网地址（如
+   `xxx.trycloudflare.com:443`）。
+4. 主机点 **🔗 复制邀请链接** 发给好友（形如
+   `potsync://xxx.trycloudflare.com/AB12CD`）。
+5. 好友：复制链接 → 点 **📋 从剪贴板读取链接并加入**。
+6. 任何人播放 / 暂停 / 拖进度条 / 点 **⏮ 上一集 / ⏭ 下一集**
+   （在 PotPlayer 里或软件里操作均可），所有人自动跟随。
+
+> 切集跟随说明：切集命令作用于 PotPlayer 的**播放列表顺序**，请确保各方
+> 播放列表内容一致（例如都把同一个剧集文件夹拖进 PotPlayer）。若直接在
+> PotPlayer 里换片导致双方媒体不一致，软件会在事件日志中提示对方切换到的
+> 媒体名，手动切到同一集后即恢复进度同步。
+
+> 说明：隧道使用 Cloudflare 免费 Quick Tunnel（trycloudflare.com），
+> 每次建房生成的域名是随机的；若 Cloudflare 不可达会自动降级到 bore.pub
+> 公共隧道；两者都失败时退回局域网模式并弹窗提示。
+
+## 二、同一局域网 / 组网工具环境
+
+主机勾选「在本机启动服务器」但**取消勾选「内网穿透」**：服务器栏填本机
+局域网 IP（或 ZeroTier / Tailscale 等组网工具的虚拟 IP），好友直连该地址。
+
+## 三、使用公共/VPS 中继（可选）
+
+如想使用自己长期固定的服务器，可在 VPS 上运行（与 exe 内嵌同一份代码）：
+
+```bat
+pip install websockets
+python server\server.py --host 0.0.0.0 --port 8765
+```
+
+所有人**不勾选**主机模式，服务器栏填 VPS 的 `IP:8765`。云服务器安全组需
+放行 TCP 8765。
+
+## 四、从源码运行 / 自行打包
+
+```bat
+pip install -r requirements.txt
+python client\app.py        :: 运行客户端
+build_client.bat            :: 打包 dist\PotSync.exe（自动启用 UPX 压缩）
+```
+
+打包环境为 64 位 Python 3.9+。隧道组件不进 exe，首次使用时按上述说明自动
+下载（内置 GitHub 直连 + 多镜像断点续传）。如需 32 位（x86）版本，改用
+32 位 Python 3.11 执行同一打包脚本即可。
+
+## 五、检查更新与版本号
+
+标题栏与主页左下角显示当前版本号；点主页 **检查更新** 按钮（或启动后静默
+自动检查）可检测新版本。发现新版并确认后，程序自动下载（断点续传 + 多镜像），
+重启即完成替换更新。
+
+默认更新源为官方发布仓库 `aaayeaaa-P1WS/PotSync` 的最新 Release，
+**开箱即可检查更新，无需任何配置**。如需改用自有更新源，在配置文件
+`C:\Users\<你>\.potsync\config.json` 中配置其一即可覆盖：
+
+```json
+"update_repo": "你的GitHub用户名/仓库名"
+```
+
+读取该仓库最新 Release：tag 为版本号（如 `v1.2.0`），资产中需包含
+`PotSync.exe`，Release 正文作为更新说明。或配置直链：
+
+```json
+"update_url": "https://你的服务器/version.json"
+```
+
+`version.json` 格式：`{"version": "1.2.0", "url": "https://…/PotSync.exe", "notes": "更新说明"}`。
+
+> 发布新版本时：`version.py` 中递增 `APP_VERSION` → 重新打包 → 把
+> `dist\PotSync.exe` 上传到 Release / 更新 version.json 即可。
+
+## 六、同步原理（简述）
+
+- 房间保存最近一次共享状态 `{paused, position, media, duration, ts}`，`ts` 为
+  **服务器时间戳**；客户端通过 ping/pong 估算与服务器时钟的偏移与延迟。
+- 播放中某端拖动进度到 200s：广播 `{paused:false, position:200s, ts:T}`；
+  接收端计算 `目标进度 = 200s + (现在 - T)`，把网络传输耗时补回来。
+- 本地侦测：每 400ms 采样本机 PotPlayer 状态，识别"暂停/播放切换、进度突变、
+  换片"并广播；应用远程指令后有 2s 静默期，避免把自己执行的指令误报回房间。
+- 漂移看门狗：每 2.5s 核对一次，本地进度与房间应有进度偏差 >2.8s 且**持续满
+  一个周期**（二次确认，避免与用户刚做的本地操作打架）才校准。
+
+## 七、测试
+
+```bat
+python tests\test_sync.py      :: 服务器协议：建房/加入/广播/改名/离房/房间解散
+python tests\test_bridge.py    :: 控制桥：对假 PotPlayer 窗口做状态读取与操控
+python tests\test_e2e.py       :: 端到端：双客户端+双假播放器+真服务器全链路同步
+python tests\test_embedded.py  :: 内嵌服务器：进程内启动/协议/优雅停止
+python tests\test_tunnel.py    :: 隧道：输出解析 / URI 构造（离线）
+python tests\test_gui.py       :: GUI 离屏：链接解析/剪贴板/主机模式一键建房
+python tests\test_firewall.py  :: 防火墙：规则脚本生成与查询（--live 真实提权安装）
+python tests\test_updater.py   :: 更新：版本比较/响应解析/本地服务器实测下载
+python tools\live_tunnel_check.py  :: 真实公网隧道联调（需联网，约 1 分钟）
+```
+
+八组离线测试全部通过；`live_tunnel_check.py` 已在真实网络下验证
+cloudflared 隧道 + wss 全链路（建房 → 加入 → 状态广播）。
+
+## 八、常见问题
+
+- **隧道组件下载慢/失败**：组件托管在 GitHub，程序内置断点续传与多个镜像源
+  自动切换；如长期失败，可手动下载 cloudflared-windows-amd64.exe 放入
+  `C:\Users\<你>\.potsync\bin\cloudflared.exe`。
+- **好友加入失败/链接打不开**：请主机确认创建房间时状态栏显示过"公网隧道
+  已建立"；若当时降级到了局域网模式，链接里会是 192.168 开头的内网地址，
+  异地无法使用，重新建房即可。
+- **首启授权被点了「否」**：加入别人房间不受影响，但当主机可能被防火墙拦截。
+  补救：删除本程序后重新首次运行会再次申请；或用管理员身份执行
+  `python client\firewall.py install "C:\完整路径\PotSync.exe"` 手动补装规则。
+- **提示媒体不一致**：两方打开的媒体总时长差超过 1.5s，大概率不是同一版本片源
+  （如 TV 版 vs BD 版、有无片头），或切集后双方播放列表顺序不一致。换成同一
+  文件/同一顺序即可。
+- **切集没有跟随**：切集按播放列表顺序进行（上一集=列表上一个）。请确认双方
+  PotPlayer 播放列表内容一致；列表为空或只有单个文件时切换无效。
+- **PotPlayer 没被识别**：确认 PotPlayer 已在运行；32 位与 64 位 PotPlayer 均
+  支持（窗口类名 PotPlayer / PotPlayer64 / PotPlayerMini / PotPlayerMini64）。
+- **主机离开/关闭程序**：隧道与房间随之关闭，其他成员会掉线，需要重新建房。
+- **开着系统代理（Clash / v2ray 等）能用吗**：可以。连接本机/内网地址时程序
+  自动跳过代理；系统代理为 socks 等不受支持的形式时自动降级为直连并在日志中
+  提示。隧道组件下载走 urllib，会正常遵循系统代理。
+- **安全性**：房间号即凭证，无密码；请勿把邀请链接发给不信任的人。Cloudflare
+  隧道链路为 HTTPS（wss）加密；VPS 自建为明文 ws，公网长期使用建议加 TLS 反代。

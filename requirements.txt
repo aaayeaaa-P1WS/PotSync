@@ -1,0 +1,6 @@
+# PotSync 依赖清单
+# 客户端需要全部三项；中继服务器只需要 websockets
+
+PyQt5>=5.15,<5.16     # 图形界面（提供 32 位 Windows wheel，支持 x86 打包）
+pywin32>=306          # Win32 窗口消息，控制 PotPlayer
+websockets>=12        # 客户端与服务器共用的 WebSocket 传输

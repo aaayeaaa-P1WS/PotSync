@@ -1,0 +1,134 @@
+/* PotSync 深色主题 */
+QWidget {
+    background-color: #1e1f26;
+    color: #e6e6eb;
+    font-family: "Microsoft YaHei UI", "微软雅黑", "Segoe UI", sans-serif;
+    font-size: 14px;
+}
+
+QLabel#title {
+    font-size: 30px;
+    font-weight: 700;
+    color: #ffffff;
+}
+QLabel#subtitle {
+    color: #9a9fb0;
+}
+QLabel#tip {
+    color: #7d8296;
+    font-size: 12.5px;
+}
+QLabel#roomCode {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: 6px;
+    color: #7ea6ff;
+}
+QLabel#syncLabel {
+    color: #3dd68c;
+    font-weight: 600;
+}
+QLabel#connLabel {
+    color: #e5534b;
+}
+
+QLineEdit {
+    background-color: #2a2c37;
+    border: 1px solid #3a3d4d;
+    border-radius: 8px;
+    padding: 8px 10px;
+    selection-background-color: #4f8cff;
+}
+QLineEdit:focus {
+    border: 1px solid #4f8cff;
+}
+
+QPushButton {
+    background-color: #2a2c37;
+    border: 1px solid #3a3d4d;
+    border-radius: 8px;
+    padding: 10px 14px;
+}
+QPushButton:hover {
+    background-color: #333646;
+    border-color: #4f8cff;
+}
+QPushButton:pressed {
+    background-color: #3c4054;
+}
+QPushButton#primaryBtn {
+    background-color: #3b6fe0;
+    border: none;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 15px;
+    padding: 12px 14px;
+}
+QPushButton#primaryBtn:hover {
+    background-color: #4f8cff;
+}
+QPushButton#dangerBtn {
+    background-color: #44292b;
+    border: 1px solid #6b3a3d;
+}
+QPushButton#dangerBtn:hover {
+    background-color: #5a3235;
+    border-color: #e5534b;
+}
+QPushButton#smallBtn {
+    padding: 8px 16px;
+}
+
+QListWidget#memberList {
+    background-color: #23242e;
+    border: 1px solid #343645;
+    border-radius: 8px;
+    padding: 6px;
+}
+QListWidget#memberList::item {
+    padding: 4px 6px;
+}
+
+QPlainTextEdit#logView {
+    background-color: #191a20;
+    border: 1px solid #2e303c;
+    border-radius: 8px;
+    color: #b7bac8;
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 12.5px;
+    padding: 6px;
+}
+
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #343645;
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background: #4f8cff;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #ffffff;
+    width: 16px;
+    height: 16px;
+    margin: -6px 0;
+    border-radius: 8px;
+}
+QSlider::handle:horizontal:hover {
+    background: #7ea6ff;
+}
+
+QFrame#divider {
+    color: #343645;
+    background-color: #343645;
+    max-height: 1px;
+}
+
+QStatusBar {
+    background-color: #191a20;
+    color: #9a9fb0;
+}
+QStatusBar QLabel {
+    padding-right: 8px;
+}

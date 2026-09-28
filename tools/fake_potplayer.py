@@ -48,7 +48,7 @@ STATUS_RUNNING = 2
 class FakePotPlayer:
     def __init__(self, media: str, duration_ms: int, paused: bool,
                  class_name: str = "PotPlayer64",
-                 playlist: Optional[list] = None) -> None:
+                 playlist: Optional[list] = None, wrap: bool = False) -> None:
         self.media = media
         self.duration = duration_ms
         self.status = STATUS_PAUSED if paused else STATUS_RUNNING
@@ -59,6 +59,7 @@ class FakePotPlayer:
         # 播放列表：[(名称, 时长ms), ...]
         self.playlist = playlist or [(media, duration_ms)]
         self.index = 0
+        self.wrap = wrap          # 到头/到尾是否循环（对应 PotPlayer 列表循环设置）
 
     # ---------- 播放模拟 ----------
 
@@ -82,7 +83,10 @@ class FakePotPlayer:
 
     def switch(self, delta: int) -> None:
         """切换上/下一集：进度归零、保持播放状态、刷新窗口标题。"""
-        new_index = max(0, min(len(self.playlist) - 1, self.index + delta))
+        if self.wrap:
+            new_index = (self.index + delta) % len(self.playlist)
+        else:
+            new_index = max(0, min(len(self.playlist) - 1, self.index + delta))
         if new_index == self.index:
             return
         self.index = new_index
@@ -160,6 +164,7 @@ def parse_playlist(spec: str) -> list:
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     paused = "--paused" in sys.argv
+    wrap = "--wrap" in sys.argv
     class_name = "PotPlayer64"
     if "--class" in sys.argv:
         i = sys.argv.index("--class")
@@ -174,7 +179,7 @@ def main() -> None:
         media = args[0] if len(args) > 0 else "demo.mp4"
         duration = int(args[1]) if len(args) > 1 else 60000
 
-    FakePotPlayer(media, duration, paused, class_name, playlist).run()
+    FakePotPlayer(media, duration, paused, class_name, playlist, wrap).run()
 
 
 if __name__ == "__main__":

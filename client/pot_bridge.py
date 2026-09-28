@@ -17,6 +17,7 @@ PotPlayer 控制桥
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -53,6 +54,23 @@ STATUS_TEXT = {STATUS_STOPPED: "已停止", 0: "已停止",
                STATUS_PAUSED: "已暂停", STATUS_RUNNING: "播放中"}
 
 WINDOW_CLASSES = ("PotPlayer64", "PotPlayer", "PotPlayerMini64", "PotPlayerMini")
+
+
+def normalize_media(name: str) -> str:
+    """媒体名归一化，用于跨机器文件名比较：
+    去目录（标题栏可能显示完整路径）、去扩展名、小写、折叠空白。"""
+    n = (name or "").strip().lower()
+    n = n.replace("\\", "/").rsplit("/", 1)[-1]     # 只留文件名
+    base, dot, ext = n.rpartition(".")
+    if dot and 1 <= len(ext) <= 5 and ext.isalnum():  # 常见视频扩展名
+        n = base
+    return re.sub(r"\s+", " ", n).strip()
+
+
+def media_matches(a: str, b: str) -> bool:
+    """两个媒体名是否指向同一文件（规范化后精确相等；任一侧为空视为不匹配）。"""
+    na, nb = normalize_media(a), normalize_media(b)
+    return bool(na) and bool(nb) and na == nb
 
 
 @dataclass

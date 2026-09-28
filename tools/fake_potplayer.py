@@ -11,14 +11,18 @@
 用法：
     python fake_potplayer.py [媒体名] [总时长ms] [--paused] [--class 类名]
                              [--playlist "ep01.mkv:600000,ep02.mkv:601000,…"]
+                             [--wrap] [--load-delay 毫秒] [--ignore-nav]
 
 --playlist 提供时启用播放列表，支持上一集/下一集（CMD 10123/10124）切换；
 列表项格式为 名称:时长ms，以逗号分隔，首项为初始媒体。
+--wrap 列表到头/到尾循环；--load-delay 模拟真实加载耗时（延迟生效切换）；
+--ignore-nav 忽略上/下一集命令（模拟播放器卡死/被弹窗挡住）。
 """
 
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from typing import Optional
 
@@ -48,7 +52,8 @@ STATUS_RUNNING = 2
 class FakePotPlayer:
     def __init__(self, media: str, duration_ms: int, paused: bool,
                  class_name: str = "PotPlayer64",
-                 playlist: Optional[list] = None, wrap: bool = False) -> None:
+                 playlist: Optional[list] = None, wrap: bool = False,
+                 load_delay: int = 0, ignore_nav: bool = False) -> None:
         self.media = media
         self.duration = duration_ms
         self.status = STATUS_PAUSED if paused else STATUS_RUNNING
@@ -60,6 +65,10 @@ class FakePotPlayer:
         self.playlist = playlist or [(media, duration_ms)]
         self.index = 0
         self.wrap = wrap          # 到头/到尾是否循环（对应 PotPlayer 列表循环设置）
+        self.load_delay = load_delay    # >0：切换后延迟该毫秒才真正生效（模拟真实加载耗时）
+        self.ignore_nav = ignore_nav    # True：忽略上/下一集命令（模拟卡死/无响应）
+        self.pending_delta = 0          # 延迟加载期间累积的切换步数
+        self._load_timer = None         # threading.Timer | None
 
     # ---------- 播放模拟 ----------
 
@@ -96,6 +105,27 @@ class FakePotPlayer:
         if self.hwnd:
             win32gui.SetWindowText(self.hwnd, f"{self.media} - PotPlayer")
 
+    def request_switch(self, delta: int) -> None:
+        """处理上/下一集命令；load_delay>0 时延迟生效（模拟真实加载）。"""
+        if self.ignore_nav:
+            return
+        if self.load_delay > 0 and self.hwnd:
+            self.pending_delta += delta
+            if self._load_timer is None:
+                self._load_timer = threading.Timer(
+                    self.load_delay / 1000, self._apply_pending)
+                self._load_timer.daemon = True
+                self._load_timer.start()
+        else:
+            self.switch(delta)
+
+    def _apply_pending(self) -> None:
+        """延迟加载到期：一次性应用累积的切换（由计时器线程触发）。"""
+        self._load_timer = None
+        if self.pending_delta:
+            delta, self.pending_delta = self.pending_delta, 0
+            self.switch(delta)
+
     # ---------- Win32 ----------
 
     def run(self) -> None:
@@ -128,9 +158,9 @@ class FakePotPlayer:
                     fake.set_status(STATUS_PAUSED if fake.status == STATUS_RUNNING
                                     else STATUS_RUNNING)
                 elif wparam == CMD_PREVIOUS:
-                    fake.switch(-1)
+                    fake.request_switch(-1)
                 elif wparam == CMD_NEXT:
-                    fake.switch(+1)
+                    fake.request_switch(+1)
                 return 0
             elif msg == win32con.WM_DESTROY:
                 win32api.PostQuitMessage(0)
@@ -165,10 +195,15 @@ def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     paused = "--paused" in sys.argv
     wrap = "--wrap" in sys.argv
+    ignore_nav = "--ignore-nav" in sys.argv
+    load_delay = 0
     class_name = "PotPlayer64"
     if "--class" in sys.argv:
         i = sys.argv.index("--class")
         class_name = sys.argv[i + 1]
+    if "--load-delay" in sys.argv:
+        i = sys.argv.index("--load-delay")
+        load_delay = int(sys.argv[i + 1])
 
     if "--playlist" in sys.argv:
         i = sys.argv.index("--playlist")
@@ -179,7 +214,8 @@ def main() -> None:
         media = args[0] if len(args) > 0 else "demo.mp4"
         duration = int(args[1]) if len(args) > 1 else 60000
 
-    FakePotPlayer(media, duration, paused, class_name, playlist, wrap).run()
+    FakePotPlayer(media, duration, paused, class_name, playlist, wrap,
+                  load_delay, ignore_nav).run()
 
 
 if __name__ == "__main__":

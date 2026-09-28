@@ -37,7 +37,8 @@ from PyQt5.QtCore import QCoreApplication  # noqa: E402
 
 from net_client import NetClient                       # noqa: E402
 from pot_bridge import (STATUS_PAUSED, STATUS_RUNNING,  # noqa: E402
-                        PotPlayerBridge, media_matches, normalize_media)
+                        PotPlayerBridge, Snapshot,
+                        media_matches, normalize_media)
 from sync_engine import SyncEngine                     # noqa: E402
 
 SERVER = ROOT / "server" / "server.py"
@@ -133,6 +134,7 @@ def main() -> int:
                       "B 入房自动匹配 ep01")
         assert ok, f"B 入房未自动匹配: 当前 {bridge_b.media_name()!r}"
         assert bridge_b.duration_ms() == 600000
+        assert wait_for(lambda: eng_b._search is None, 10, "搜索①收尾")
         print(f"PASS  入房自动匹配：B 从 ep03 自动切到 {bridge_b.media_name()!r}")
 
         # ② A 在播放器里直接切下一集（模拟快捷键/播放器按钮，不经引擎）
@@ -141,6 +143,7 @@ def main() -> int:
                       "B 跟随 ep02")
         assert ok, f"B 未跟随播放器内切集: 当前 {bridge_b.media_name()!r}"
         assert bridge_b.duration_ms() == 610000
+        assert wait_for(lambda: eng_b._search is None, 10, "搜索②收尾")
         print(f"PASS  播放器内切集跟随：A 切 ep02 → B 自动切到 "
               f"{bridge_b.media_name()!r}")
 
@@ -150,6 +153,7 @@ def main() -> int:
                       "B 掉头反搜 ep03")
         assert ok, f"B 反搜未命中: 当前 {bridge_b.media_name()!r}"
         assert bridge_b.duration_ms() == 620000
+        assert wait_for(lambda: eng_b._search is None, 10, "搜索③收尾")
         print("PASS  列表尽头掉头反搜：B 从末尾反向找到 ep03")
 
         # ④ A 切到 B 没有的 ep99 → B 全表轮巡未找到 → 返回 ep03 并提示
@@ -174,6 +178,129 @@ def main() -> int:
         assert not any("正在本机播放列表查找" in m for m in new_logs), \
             f"失败缓存失效，重复轮巡了: {new_logs}"
         print("PASS  失败缓存：同一缺失媒体不重复轮巡（播放/暂停仍跟随）")
+
+        # ⑥ 慢加载真实场景：文件打开需 900ms（标题滞后），仍能正确匹配且不误判尽头
+        fake_c = subprocess.Popen(
+            [sys.executable, str(FAKE), "--class", "FakePotSlowC", "--playlist",
+             "ep02.mkv:610000,ep01.mkv:600000,ep03.mkv:620000",
+             "--load-delay", "900"])
+        fake_d = subprocess.Popen(
+            [sys.executable, str(FAKE), "--class", "FakePotSlowD", "--playlist",
+             "ep03.mkv:620000,ep01.mkv:600000,ep02.mkv:610000",
+             "--load-delay", "900"])
+        try:
+            bridge_c = PotPlayerBridge(("FakePotSlowC",))
+            bridge_d = PotPlayerBridge(("FakePotSlowD",))
+            assert wait_for(lambda: bridge_c.available() and bridge_d.available(),
+                            desc="慢加载假播放器启动")
+            net_c, net_d = NetClient(), NetClient()
+            eng_c = SyncEngine(bridge_c, net_c)
+            eng_d = SyncEngine(bridge_d, net_d)
+            eng_c.sigBroadcastState.connect(
+                lambda s: net_c.send_state(s["paused"], s["position"], s["media"],
+                                           s["duration"], s["action"]))
+            eng_d.sigBroadcastState.connect(
+                lambda s: net_d.send_state(s["paused"], s["position"], s["media"],
+                                           s["duration"], s["action"]))
+            net_c.sigState.connect(eng_c.apply_remote_state)
+            net_d.sigState.connect(eng_d.apply_remote_state)
+            conn2 = {"c": False, "d": False}
+            net_c.sigConnected.connect(lambda: conn2.__setitem__("c", True))
+            net_d.sigConnected.connect(lambda: conn2.__setitem__("d", True))
+            net_c.connect_to(HOST, PORT)
+            net_d.connect_to(HOST, PORT)
+            assert wait_for(lambda: conn2["c"] and conn2["d"], desc="慢场景连接")
+
+            created2 = {}
+            net_c.sigRoomCreated.connect(
+                lambda r, st, m: (created2.update(room=r), eng_c.enter_room(st)))
+            net_c.create_room("小慢")
+            assert wait_for(lambda: "room" in created2, desc="慢场景建房")
+            assert wait_for(lambda: eng_c.room_state is not None, 6, "慢场景初始状态")
+            joined2 = {}
+            net_d.sigRoomJoined.connect(
+                lambda r, st, m: (joined2.update(room=r), eng_d.enter_room(st)))
+            net_d.join_room(created2["room"], "小加载")
+            # d 在 ep03(index0)，房间 ep02 → 正向 2 步命中（加载 900ms < 步超时 3.5s）
+            ok = wait_for(lambda: media_matches(bridge_d.media_name(), "ep02.mkv"),
+                          25, "慢加载匹配 ep02")
+            assert ok, f"慢加载未匹配: 当前 {bridge_d.media_name()!r}"
+            assert wait_for(lambda: eng_d._search is None, 10, "慢加载搜索收尾")
+            print("PASS  慢加载匹配：900ms 加载延迟下正向 2 步命中 ep02（未误判尽头）")
+
+            # c 切到 ep03：d 当前 ep02(自身列表末尾) → 正向尽头探测 → 掉头反搜命中
+            bridge_c.next()      # ep02(index0) → 累积 +2 → ep03(index2)
+            bridge_c.next()
+            ok = wait_for(lambda: media_matches(bridge_d.media_name(), "ep03.mkv"),
+                          40, "慢加载反搜 ep03")
+            assert ok, f"慢加载反搜未命中: 当前 {bridge_d.media_name()!r}"
+            print("PASS  慢加载反搜：真实加载耗时下掉头搜索仍正确命中 ep03")
+        finally:
+            for p in (fake_c, fake_d):
+                p.terminate()
+            for p in (fake_c, fake_d):
+                try:
+                    p.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+
+        # ⑦ 播放器对上/下一集完全无反应（卡死/弹窗挡住）：有界中止，绝不轰炸
+        fake_e = subprocess.Popen(
+            [sys.executable, str(FAKE), "--class", "FakePotStuckE", "--playlist",
+             "ep02.mkv:610000,ep01.mkv:600000", "--ignore-nav"])
+        try:
+            bridge_e = PotPlayerBridge(("FakePotStuckE",))
+            assert wait_for(bridge_e.available, desc="无响应假播放器启动")
+            eng_e = SyncEngine(bridge_e, NetClient())
+            logs_e = []
+            eng_e.sigLog.connect(logs_e.append)
+            eng_e._start_media_follow({"media": "ep01.mkv", "action": "open",
+                                       "paused": False, "position": 0,
+                                       "duration": 600000, "ts": 0})
+            # 两个方向各 1 步×(3.5s 等待 + 3.5s 补发) ≈ 14s 内有界收尾
+            ok = wait_for(lambda: any("未找到" in m for m in logs_e), 30,
+                          "无响应有界中止")
+            assert ok, f"未按预期中止。日志: {logs_e[-5:]}"
+            assert wait_for(lambda: eng_e._search is None, 15, "搜索状态清理")
+            assert fake_e.poll() is None, "假播放器进程异常退出"
+            assert media_matches(bridge_e.media_name(), "ep02.mkv"), \
+                f"起点媒体被意外改动: {bridge_e.media_name()!r}"
+            print("PASS  无响应保护：播放器不执行切换时 14s 内有界收尾，进程存活")
+        finally:
+            fake_e.terminate()
+            try:
+                fake_e.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                fake_e.kill()
+
+        # ⑧ SendMessage 全面超时（播放器已彻底卡死）：立即中止，绝不再发命令
+        class DeadBridge:
+            def snapshot(self):
+                return Snapshot(status=STATUS_PAUSED, position=0,
+                                duration=600000, media="ep01.mkv")
+            def media_name(self):
+                return "ep01.mkv"
+            def pause(self):
+                return True
+            def play(self):
+                return True
+            def seek_ms(self, p):
+                return True
+            def next(self):
+                return False
+            def previous(self):
+                return False
+
+        eng_x = SyncEngine(DeadBridge(), NetClient())
+        logs_x = []
+        eng_x.sigLog.connect(logs_x.append)
+        eng_x._start_media_follow({"media": "ep02.mkv", "action": "open",
+                                   "paused": False, "position": 0,
+                                   "duration": 610000, "ts": 0})
+        ok = wait_for(lambda: eng_x._search is None
+                      and any("未响应" in m for m in logs_x), 8, "卡死立即中止")
+        assert ok, f"卡死未立即中止。日志: {logs_x}"
+        print("PASS  卡死保护：命令超时立即中止轮巡，不再向播放器发任何命令")
 
         print("\n全部通过 ✔")
         return 0

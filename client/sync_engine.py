@@ -38,9 +38,13 @@ GUARD_SECONDS = 2.0         # 应用远程状态后的静默期（避免把"自�
 MEDIA_DIFF_MS = 1500        # 总时长差超过此值认为双方媒体不一致
 
 # 文件名自动匹配（在本机播放列表中轮巡查找对方正在播放的同名文件）
-SEARCH_STEP_MS = 260          # 每步切换后等待标题刷新
-SEARCH_MAX_STEPS = 400        # 轮巡步数上限（兜底）
-SEARCH_SAME_TITLE_LIMIT = 3   # 连续多次标题不变 = 已到播放列表尽头（不循环模式）
+# 真实 PotPlayer 打开文件需要 0.5~3 秒；切换命令必须等标题真正变化后再发下一条，
+# 否则命令在播放器消息队列里堆积，会把 PotPlayer 刷成"未响应"。
+SEARCH_POLL_MS = 150          # 轮巡中标题轮询间隔
+SEARCH_SETTLE_MS = 400        # 标题变化后的安定等待（加载未完全就绪，缓一步再切）
+SEARCH_STEP_TIMEOUT_MS = 3500 # 单步等待标题变化上限（超过视为已到列表尽头/文件缺失）
+SEARCH_RADIUS = 40            # 单方向搜索半径（步数上限）
+SEARCH_TOTAL_S = 150.0        # 轮巡总时长预算（秒），超时整体中止
 
 
 def clamp(v: int, lo: int, hi: int) -> int:
@@ -202,8 +206,20 @@ class SyncEngine(QObject):
         # 正在匹配跟随中：轮巡期间只更新目标为最新状态，不打断搜索
         if self._search is not None:
             self.room_state = dict(s)
-            if not self._search.get("returning"):
-                self._search["state"] = dict(s)
+            sr = self._search
+            if sr.get("phase") != "return":
+                # 若当前已落在旧目标上（收尾节拍未跑但标题已到），以它为新的
+                # 返回锚点重新出发——返回点应始终是用户此刻实际看到的影片
+                cur = self.bridge.media_name()
+                old_target = (sr["state"].get("media") or "").strip()
+                if old_target and media_matches(cur, old_target):
+                    sr["start"] = cur
+                    sr["phase"] = "fwd"
+                    sr["direction"] = -1 if s.get("action") == "prev" else 1
+                    sr["phase_steps"] = 0
+                    sr["offset"] = 0
+                    sr["await"] = None
+                sr["state"] = dict(s)
             return
 
         # 切集动作：先跟随切换，再按状态对齐
@@ -305,7 +321,12 @@ class SyncEngine(QObject):
     # ---------- 文件名自动匹配跟随 ----------
 
     def _start_media_follow(self, s: dict) -> None:
-        """在本机播放列表中轮巡查找与对方同名的文件并切换过去（异步状态机）。"""
+        """在本机播放列表中轮巡查找与对方同名的文件并切换过去（自适应步进状态机）。
+
+        关键安全约束：同一时刻最多只有一条切换命令在途——必须等窗口标题真正
+        变化（或超时）才发下一条，否则快速连发会堵死 PotPlayer 的消息队列，
+        把播放器刷成"未响应"。
+        """
         target = (s.get("media") or "").strip()
         if not target:
             return
@@ -316,75 +337,127 @@ class SyncEngine(QObject):
         if snap is None or not snap.media:
             self.sigLog.emit("本机未在播放任何媒体，无法自动匹配")
             return
+        if snap.playing:
+            self.bridge.pause()     # 暂停后轮巡：只加载不解码渲染，压力骤降
         direction = -1 if s.get("action") == "prev" else 1
         self._search = {
             "state": dict(s),          # 最新目标状态（含媒体名/进度/暂停）
             "start": snap.media,       # 轮巡起点（找不到时回到这里）
             "direction": direction,
-            "reversed": False,         # 已到尽头掉头（不循环列表两段式搜索）
-            "steps": 0,                # 已切换次数
-            "last_media": snap.media,  # 上一步看到的标题
-            "same_count": 0,           # 连续标题不变次数（尽头检测）
-            "returning": False,        # 正在返回起点
+            "phase": "fwd",            # fwd（正向）→ back（掉头反搜）→ return（返回起点）
+            "phase_steps": 0,          # 本阶段已完成的切换步数
+            "offset": 0,               # fwd/back 阶段净位移（next=+1，prev=-1），返回起点用
+            "await": None,             # {"from", "deadline", "resent"}：等待标题变化中
+            "t0": time.monotonic(),
         }
-        self.sigLog.emit(f"正在本机播放列表查找《{target}》…")
+        self.sigLog.emit(f"正在本机播放列表查找《{target}》（已暂停播放，逐集匹配）…")
         self.sigSyncInfo.emit("🔍 匹配媒体中…")
-        QTimer.singleShot(0, self._search_step)
+        QTimer.singleShot(0, self._search_tick)
 
-    def _search_step(self) -> None:
+    def _search_move(self, sr: dict) -> bool:
+        """发一条切换命令；False = PotPlayer 消息超时（可能已卡死）。"""
+        return self.bridge.next() if sr["direction"] > 0 else self.bridge.previous()
+
+    def _search_tick(self) -> None:
         sr = self._search
         if sr is None:
             return
-        target = (sr["state"].get("media") or "").strip()
+        s = sr["state"]
+        target = (s.get("media") or "").strip()
         if not target:
+            self._finish_search(False)
+            return
+        if time.monotonic() - sr["t0"] > SEARCH_TOTAL_S:
+            self.sigLog.emit("⌛ 匹配超时，停止查找")
             self._finish_search(False)
             return
         cur = self.bridge.media_name()
         if media_matches(cur, target):
             self._finish_search(True)
             return
-        if sr["steps"] >= SEARCH_MAX_STEPS:
-            self._finish_search(False)
-            return
-        # 循环模式：整圈回到起点即未找到（掉头/返回阶段经过起点不算）
-        if not sr["reversed"] and not sr["returning"] and sr["steps"] > 0 \
-                and media_matches(cur, sr["start"]):
-            self._finish_search(False)
-            return
-        ok = self.bridge.next() if sr["direction"] > 0 else self.bridge.previous()
-        if not ok:
-            self._finish_search(False)
-            return
-        QTimer.singleShot(SEARCH_STEP_MS, self._search_after_move)
 
-    def _search_after_move(self) -> None:
+        aw = sr["await"]
+        if aw is not None:
+            if cur != aw["from"]:
+                # 标题已变化：本步完成；稍候片刻等加载安定再走下一步
+                sr["await"] = None
+                sr["phase_steps"] += 1
+                if sr["phase"] != "return":
+                    sr["offset"] += sr["direction"]
+                    # 循环列表：整圈回到起点 = 未找到
+                    if sr["phase"] == "fwd" and media_matches(cur, sr["start"]):
+                        self._finish_search(False)
+                        return
+                QTimer.singleShot(SEARCH_SETTLE_MS, self._search_tick)
+                return
+            if time.monotonic() < aw["deadline"]:
+                QTimer.singleShot(SEARCH_POLL_MS, self._search_tick)
+                return
+            # 一步内标题始终未变
+            sr["await"] = None
+            if not aw["resent"]:
+                # 命令可能被加载过程吞掉：补发一次再等一轮
+                if not self._search_move(sr):
+                    self._abort_search_unresponsive()
+                    return
+                sr["await"] = {
+                    "from": cur,
+                    "deadline": time.monotonic() + SEARCH_STEP_TIMEOUT_MS / 1000,
+                    "resent": True,
+                }
+                QTimer.singleShot(SEARCH_POLL_MS, self._search_tick)
+                return
+            # 补发后仍不动：此方向已到尽头（或文件缺失打不开）
+            self._search_phase_done()
+            return
+
+        # 未处于等待：半径检查 → 发下一步
+        if sr["phase_steps"] >= self._search_radius(sr):
+            self._search_phase_done()
+            return
+        if not self._search_move(sr):
+            self._abort_search_unresponsive()
+            return
+        sr["await"] = {
+            "from": cur,
+            "deadline": time.monotonic() + SEARCH_STEP_TIMEOUT_MS / 1000,
+            "resent": False,
+        }
+        QTimer.singleShot(SEARCH_POLL_MS, self._search_tick)
+
+    @staticmethod
+    def _search_radius(sr: dict) -> int:
+        if sr["phase"] == "return":
+            return abs(sr["offset"]) + 4    # 返回起点只需走来时的步数（留余量）
+        return SEARCH_RADIUS
+
+    def _search_phase_done(self) -> None:
+        """当前方向搜完（到尽头或超半径）：正向→掉头反搜；反搜→未找到收尾。"""
         sr = self._search
         if sr is None:
             return
-        target = (sr["state"].get("media") or "").strip()
-        cur = self.bridge.media_name()
-        if target and media_matches(cur, target):
-            self._finish_search(True)
+        if sr["phase"] == "fwd":
+            sr["phase"] = "back"
+            sr["direction"] = -sr["direction"]
+            sr["phase_steps"] = 0
+            sr["await"] = None
+            QTimer.singleShot(0, self._search_tick)
             return
-        if cur == sr["last_media"]:
-            sr["same_count"] += 1
-            if sr["same_count"] >= SEARCH_SAME_TITLE_LIMIT:
-                # 列表尽头（不循环模式）
-                if not sr["reversed"] and not sr["returning"] \
-                        and sr["direction"] > 0:
-                    # 掉头往回搜起点另一侧
-                    sr["reversed"] = True
-                    sr["direction"] = -1
-                    sr["same_count"] = 0
-                    QTimer.singleShot(0, self._search_step)
-                    return
-                self._finish_search(False)
-                return
-        else:
-            sr["same_count"] = 0
-            sr["steps"] += 1
-            sr["last_media"] = cur
-        QTimer.singleShot(0, self._search_step)
+        self._finish_search(False)
+
+    def _abort_search_unresponsive(self) -> None:
+        """PotPlayer 消息超时（可能卡死）：立即停止轮巡，绝不再发命令。"""
+        sr = self._search
+        target = ""
+        if sr is not None:
+            target = (sr["state"].get("media") or "").strip()
+        self._search = None
+        if target:
+            self._failed_media = normalize_media(target)
+        self.sigLog.emit("⚠ PotPlayer 未响应，已停止自动匹配；请检查播放器是否卡住")
+        self._guard(2.0)
+        self._last = self.bridge.snapshot()
+        self._last_mono = time.monotonic()
 
     def _finish_search(self, found: bool) -> None:
         sr = self._search
@@ -392,7 +465,7 @@ class SyncEngine(QObject):
             return
         s = dict(sr["state"])
         if found:
-            if sr["returning"]:        # 已回到起点
+            if sr["phase"] == "return":        # 已回到起点
                 self._search = None
                 self._guard(1.5)
                 self._last = self.bridge.snapshot()
@@ -405,20 +478,26 @@ class SyncEngine(QObject):
             self._guard(2.5)
             self._align_to_state(s)
             return
-        if not sr["returning"]:
-            # 未找到：缓存失败结果（避免对同一文件反复全表轮巡），然后返回起点
+        if sr["phase"] != "return":
+            # 未找到：缓存失败结果（避免对同一文件反复轮巡），然后返回起点
             target = (s.get("media") or "").strip()
             self._failed_media = normalize_media(target)
             self.sigLog.emit(
-                f"⚠ 本机播放列表中未找到《{target}》，保持当前媒体；"
+                f"⚠ 本机播放列表中未找到《{target}》，正在返回原媒体；"
                 "把同名文件加入播放列表后，对方再操作一次即可自动匹配")
-            sr["returning"] = True
-            sr["reversed"] = False
-            sr["direction"] = -sr["direction"]     # 掉头回起点
-            sr["same_count"] = 0
-            sr["steps"] = 0
+            cur = self.bridge.media_name()
+            if sr["offset"] == 0 or media_matches(cur, sr["start"]):
+                self._search = None
+                self._guard(1.5)
+                self._last = self.bridge.snapshot()
+                self._last_mono = time.monotonic()
+                return
+            sr["phase"] = "return"
             sr["state"] = dict(s, media=sr["start"])   # 返回阶段目标=起点
-            QTimer.singleShot(SEARCH_STEP_MS, self._search_step)
+            sr["direction"] = -1 if sr["offset"] > 0 else 1
+            sr["phase_steps"] = 0
+            sr["await"] = None
+            QTimer.singleShot(0, self._search_tick)
             return
         # 返回起点也失败（极端情况）：放弃，保持当前位置
         self._search = None
@@ -575,7 +654,8 @@ class SyncEngine(QObject):
             self.sigSyncInfo.emit("")
             return
         if self._search is not None:
-            self.sigSyncInfo.emit("🔍 匹配媒体中…" if not self._search["returning"]
+            self.sigSyncInfo.emit("🔍 匹配媒体中…"
+                                  if self._search.get("phase") != "return"
                                   else "↩ 未找到，返回原媒体…")
             return
         s = self.room_state

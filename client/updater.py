@@ -139,6 +139,8 @@ if not errorlevel 1 (
     goto wait
 )
 move /y "%NEW%" "%OLD%" >nul
+rem 等待杀毒软件/索引服务对新文件扫描就绪，降低重启时 DLL 加载竞争
+timeout /t 2 /nobreak >nul
 start "" "%OLD%"
 del "%~f0" >nul 2>&1
 """

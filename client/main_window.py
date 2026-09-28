@@ -196,7 +196,8 @@ class MainWindow(QMainWindow):
             return
         # 发现新版本
         notes = (info.notes or "").strip()[:500]
-        text = f"发现新版本 v{info.version}（当前 v{APP_VERSION}）。"
+        ver = info.version.lstrip("vV")
+        text = f"发现新版本 v{ver}（当前 v{APP_VERSION}）。"
         if notes:
             text += f"\n\n更新说明：\n{notes}"
         text += "\n\n是否下载并更新？（下载完成后重启软件生效）"

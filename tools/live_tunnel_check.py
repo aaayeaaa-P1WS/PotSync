@@ -33,13 +33,14 @@ LOCAL_PORT = 18768
 
 async def ws_roundtrip(base_uri: str) -> None:
     import websockets
-    c1 = await websockets.connect(base_uri)
+    # proxy=None：本机系统代理可能是 socks 协议（websockets 不支持），直连隧道域名
+    c1 = await websockets.connect(base_uri, proxy=None)
     await c1.send(json.dumps({"type": "create", "nickname": "穿透主机"}))
     m = json.loads(await asyncio.wait_for(c1.recv(), 10))
     assert m["type"] == "created", m
     room = m["room"]
 
-    c2 = await websockets.connect(base_uri)
+    c2 = await websockets.connect(base_uri, proxy=None)
     await c2.send(json.dumps({"type": "join", "room": room, "nickname": "异地好友"}))
     m = json.loads(await asyncio.wait_for(c2.recv(), 10))
     assert m["type"] == "joined", m

@@ -16,6 +16,8 @@
 4. B 位于列表末尾时，对方切到 ep03 → 掉头反向搜索命中
 5. A 切到 B 没有的 ep99 → B 全表轮巡未找到 → 返回原媒体并提示；
    后续同媒体状态不再重复轮巡（失败缓存）
+6. 同目录直开：定位当前文件完整路径 → 同目录找同名文件直接打开，
+   零轮巡一次切换到位（场景⑨）
 
 运行：python tests/test_follow.py
 """
@@ -23,6 +25,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -33,12 +36,13 @@ os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "client"))
 
+import win32gui                            # noqa: E402
 from PyQt5.QtCore import QCoreApplication  # noqa: E402
 
 from net_client import NetClient                       # noqa: E402
 from pot_bridge import (STATUS_PAUSED, STATUS_RUNNING,  # noqa: E402
                         PotPlayerBridge, Snapshot,
-                        media_matches, normalize_media)
+                        find_media_in_dir, media_matches, normalize_media)
 from sync_engine import SyncEngine                     # noqa: E402
 
 SERVER = ROOT / "server" / "server.py"
@@ -301,6 +305,66 @@ def main() -> int:
                       and any("未响应" in m for m in logs_x), 8, "卡死立即中止")
         assert ok, f"卡死未立即中止。日志: {logs_x}"
         print("PASS  卡死保护：命令超时立即中止轮巡，不再向播放器发任何命令")
+
+        # ⑨ 同目录直开：定位当前文件完整路径 → 同目录找同名文件直接打开，零轮巡
+        tmpdir = tempfile.mkdtemp(prefix="potsync_dir_")
+        for n in ("ep01.mkv", "ep02.mkv", "ep03.mkv"):
+            open(os.path.join(tmpdir, n), "w").close()
+        ep01_path = os.path.join(tmpdir, "ep01.mkv")
+        # find_media_in_dir 规范化单测
+        assert find_media_in_dir(tmpdir, "ep01") == ep01_path
+        assert find_media_in_dir(tmpdir, "ep01v2") == ""      # 前缀相似不误判
+        assert find_media_in_dir(tmpdir, "ep09") == ""        # 不存在
+        open(os.path.join(tmpdir, "note.txt"), "w").close()
+        assert find_media_in_dir(tmpdir, "note") == ""        # 非视频扩展名不匹配
+        tmpdir2 = tempfile.mkdtemp(prefix="potsync_dir2_")
+        ep02_up = os.path.join(tmpdir2, "EP02 .MKV")
+        open(ep02_up, "w").close()
+        assert find_media_in_dir(tmpdir2, "ep02") == ep02_up  # 大小写/空白规范化命中
+        print("PASS  目录扫描：同名视频命中，相似名/非视频/缺失均不误判")
+
+        class DirBridge(PotPlayerBridge):
+            """模拟可定位当前文件路径的桥：直开时改写窗口标题（等价换了文件）。"""
+            def __init__(self, classes, cur_path):
+                super().__init__(classes)
+                self._cur_path = cur_path
+                self.opened = []
+
+            def current_media_path(self):
+                return self._cur_path
+
+            def open_file(self, path):
+                self.opened.append(path)
+                win32gui.SetWindowText(
+                    self.find_window(), os.path.basename(path) + " - PotPlayer")
+                return True
+
+        fake_g = subprocess.Popen(
+            [sys.executable, str(FAKE), "--class", "FakePotDirG", "--paused",
+             "--playlist", "ep03.mkv:620000"])
+        try:
+            bridge_g = DirBridge(("FakePotDirG",), os.path.join(tmpdir, "ep03.mkv"))
+            assert wait_for(bridge_g.available, desc="直开场景假播放器启动")
+            eng_g = SyncEngine(bridge_g, NetClient())
+            eng_g._start_media_follow({"media": "ep01.mkv", "action": "open",
+                                       "paused": True, "position": 5000,
+                                       "duration": 600000, "ts": 0})
+            assert bridge_g.opened == [ep01_path], \
+                f"未直开同目录文件: {bridge_g.opened}"
+            assert eng_g._search is None, "直开成功不应进入轮巡"
+            ok = wait_for(lambda: media_matches(bridge_g.media_name(), "ep01.mkv")
+                          and bridge_g.position_ms() == 5000
+                          and bridge_g.status() == STATUS_PAUSED,
+                          8, "直开后对齐")
+            assert ok, (f"直开后未对齐: media={bridge_g.media_name()!r} "
+                        f"pos={bridge_g.position_ms()}")
+            print("PASS  同目录直开：零轮巡一次切换到位，并按房间状态对齐进度/暂停")
+        finally:
+            fake_g.terminate()
+            try:
+                fake_g.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                fake_g.kill()
 
         print("\n全部通过 ✔")
         return 0

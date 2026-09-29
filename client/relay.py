@@ -92,7 +92,8 @@ class Hub:
 
     async def _broadcast(self, room: Room, obj: dict, exclude: Optional[Client] = None) -> None:
         dead = []
-        for c in room.clients.values():
+        # 发送会让出协程，期间可能有成员并发进出 → 先拍快照再迭代
+        for c in list(room.clients.values()):
             if exclude is not None and c.id == exclude.id:
                 continue
             if not await self._send(c, obj):

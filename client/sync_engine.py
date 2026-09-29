@@ -18,13 +18,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Optional
 
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from pot_bridge import (STATUS_PAUSED, STATUS_RUNNING, PotPlayerBridge, Snapshot,
-                        media_matches, normalize_media)
+                        find_media_in_dir, media_matches, normalize_media)
 
 log = logging.getLogger("potsync.sync")
 
@@ -37,11 +38,14 @@ DRIFT_CORRECT_MS = 2800     # 漂移校准阈值
 GUARD_SECONDS = 2.0         # 应用远程状态后的静默期（避免把"自己执行远程指令"误判为本地操作）
 MEDIA_DIFF_MS = 1500        # 总时长差超过此值认为双方媒体不一致
 
-# 文件名自动匹配（在本机播放列表中轮巡查找对方正在播放的同名文件）
-# 真实 PotPlayer 打开文件需要 0.5~3 秒；切换命令必须等标题真正变化后再发下一条，
-# 否则命令在播放器消息队列里堆积，会把 PotPlayer 刷成"未响应"。
+# 文件名自动匹配：优先"同目录直开"（枚举 PotPlayer 句柄拿到当前文件完整路径，
+# 在同目录找同名文件直接启动播放器打开，等价用户双击，单次切换零轮巡）；
+# 同目录找不到时才回退到播放列表轮巡。轮巡是兜底路径，节奏放得更温和：
+# 真实 PotPlayer 打开文件需要 0.5~3 秒；切换命令必须等标题真正变化、且文件
+# 加载就绪（时长可用）后再发下一条，否则命令在播放器消息队列里堆积，
+# 会把 PotPlayer 刷成"未响应"甚至空指针崩溃。
 SEARCH_POLL_MS = 150          # 轮巡中标题轮询间隔
-SEARCH_SETTLE_MS = 400        # 标题变化后的安定等待（加载未完全就绪，缓一步再切）
+SEARCH_SETTLE_MS = 800        # 标题变化后的安定等待（加载未完全就绪，缓一步再切）
 SEARCH_STEP_TIMEOUT_MS = 3500 # 单步等待标题变化上限（超过视为已到列表尽头/文件缺失）
 SEARCH_RADIUS = 40            # 单方向搜索半径（步数上限）
 SEARCH_TOTAL_S = 150.0        # 轮巡总时长预算（秒），超时整体中止
@@ -72,6 +76,8 @@ class SyncEngine(QObject):
         self._mismatch_since: float = 0.0  # 看门狗首次发现不一致的时刻（二次确认用）
         self._search: Optional[dict] = None    # 文件名匹配轮巡状态（None=未在搜索）
         self._failed_media = ""            # 最近一次匹配失败的媒体名（规范化），避免反复全表轮巡
+        self._media_dirs: list = []        # 已知媒体目录（MRU，最多 8 个），同目录直开用
+        self._direct_failed = ""           # 直开匹配失败的媒体名（规范化），防直开→轮巡→直开死循环
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_INTERVAL_MS)
@@ -93,6 +99,8 @@ class SyncEngine(QObject):
         self._mismatch_since = 0.0
         self._search = None
         self._failed_media = ""
+        self._media_dirs = []
+        self._direct_failed = ""
         if state:
             self.apply_remote_state(state, initial=True)
 
@@ -103,6 +111,8 @@ class SyncEngine(QObject):
         self._mismatch_since = 0.0
         self._search = None
         self._failed_media = ""
+        self._media_dirs = []
+        self._direct_failed = ""
 
     def _cancel_search(self) -> None:
         """本地用户主动操作时取消正在进行的匹配跟随（本地意图优先）。"""
@@ -110,6 +120,7 @@ class SyncEngine(QObject):
             self._search = None
             self.sigLog.emit("已取消自动匹配（本地操作优先）")
         self._failed_media = ""
+        self._direct_failed = ""
 
     def server_now(self) -> int:
         try:
@@ -337,6 +348,9 @@ class SyncEngine(QObject):
         if snap is None or not snap.media:
             self.sigLog.emit("本机未在播放任何媒体，无法自动匹配")
             return
+        # 首选零轮巡路径：定位当前文件完整路径 → 同目录找同名文件直接打开
+        if self._try_direct_match(target, s):
+            return
         if snap.playing:
             self.bridge.pause()     # 暂停后轮巡：只加载不解码渲染，压力骤降
         direction = -1 if s.get("action") == "prev" else 1
@@ -353,6 +367,75 @@ class SyncEngine(QObject):
         self.sigLog.emit(f"正在本机播放列表查找《{target}》（已暂停播放，逐集匹配）…")
         self.sigSyncInfo.emit("🔍 匹配媒体中…")
         QTimer.singleShot(0, self._search_tick)
+
+    # ---------- 同目录直开（零轮巡匹配） ----------
+
+    def _learn_path(self, dirpath: str) -> None:
+        """记录媒体所在目录（MRU，最多 8 个），供后续同目录查找。"""
+        if not dirpath:
+            return
+        try:
+            dirpath = os.path.normpath(dirpath)
+        except Exception:
+            return
+        if dirpath in self._media_dirs:
+            self._media_dirs.remove(dirpath)
+        self._media_dirs.insert(0, dirpath)
+        del self._media_dirs[8:]
+
+    def _try_direct_match(self, target: str, s: dict) -> bool:
+        """零轮巡直开：枚举 PotPlayer 句柄拿到当前文件完整路径 → 同目录找
+        同名文件 → 直接启动 PotPlayer 打开（等价用户双击，单次切换，对播放器
+        零压力）。成功返回 True；无法定位/未找到/打开失败返回 False，
+        调用方回退到播放列表轮巡。"""
+        norm = normalize_media(target)
+        if not norm or norm == self._direct_failed:
+            return False
+        try:
+            cur_path = self.bridge.current_media_path()
+        except Exception as exc:
+            log.debug("current_media_path 失败: %s", exc)
+            cur_path = ""
+        if cur_path:
+            self._learn_path(os.path.dirname(cur_path))
+        hit = ""
+        for d in list(self._media_dirs):
+            hit = find_media_in_dir(d, norm)
+            if hit:
+                break
+        if not hit:
+            return False
+        return self._open_matched(hit, s)
+
+    def _open_matched(self, path: str, s: dict) -> bool:
+        self._guard(3.0)
+        if not self.bridge.open_file(path):
+            return False
+        self.sigLog.emit(f"✓ 已在同目录找到同名文件，直接打开：{os.path.basename(path)}")
+        self.sigSyncInfo.emit("⏳ 加载媒体中…")
+        QTimer.singleShot(1600, lambda: self._after_direct_open(path, dict(s)))
+        return True
+
+    def _after_direct_open(self, path: str, s: dict) -> None:
+        target = (s.get("media") or "").strip()
+        norm = normalize_media(target)
+        cur = self.bridge.media_name()
+        if not media_matches(cur, target):
+            # 多实例：文件可能开在了另一个窗口 → 按标题重新绑定一次
+            try:
+                self.bridge.rebind_to_title(norm)
+            except Exception:
+                pass
+            cur = self.bridge.media_name()
+        if not media_matches(cur, target):
+            # 直开未生效（播放器拒绝/标题未刷新）：回退到轮巡匹配，
+            # 并记住本次直开失败，避免 直开→轮巡→直开 死循环
+            self._direct_failed = norm
+            self._start_media_follow(s)
+            return
+        self._direct_failed = ""
+        self._guard(2.0)
+        self._align_to_state(s)
 
     def _search_move(self, sr: dict) -> bool:
         """发一条切换命令；False = PotPlayer 消息超时（可能已卡死）。"""
@@ -379,7 +462,13 @@ class SyncEngine(QObject):
         aw = sr["await"]
         if aw is not None:
             if cur != aw["from"]:
-                # 标题已变化：本步完成；稍候片刻等加载安定再走下一步
+                # 标题已变化，但文件可能还在加载（时长未就绪）——等到就绪或
+                # 本步 deadline 再收尾，避免在加载中途又发下一条切换命令
+                dur = self.bridge.duration_ms()
+                if (not dur or dur <= 0) and time.monotonic() < aw["deadline"]:
+                    QTimer.singleShot(SEARCH_POLL_MS, self._search_tick)
+                    return
+                # 本步完成；稍候片刻等加载安定再走下一步
                 sr["await"] = None
                 sr["phase_steps"] += 1
                 if sr["phase"] != "return":

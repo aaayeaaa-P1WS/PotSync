@@ -42,10 +42,13 @@ REQUEST_TIMEOUT = 20
 
 
 class UpdateInfo:
-    def __init__(self, version: str, url: str, notes: str = "") -> None:
+    def __init__(self, version: str, url: str, notes: str = "",
+                 sha256: str = "", sha256_url: str = "") -> None:
         self.version = version
         self.url = url
         self.notes = notes
+        self.sha256 = sha256            # 期望的 exe SHA-256（小写 hex，可为空）
+        self.sha256_url = sha256_url    # 或提供校验和文本的下载地址（可为空）
 
     def __repr__(self) -> str:
         return f"UpdateInfo(v{self.version}, {self.url})"
@@ -80,20 +83,26 @@ def _parse_version_json(data: dict) -> UpdateInfo:
     if not data.get("version") or not data.get("url"):
         raise ValueError("version.json 缺少 version 或 url 字段")
     return UpdateInfo(str(data["version"]), str(data["url"]),
-                      str(data.get("notes", "")))
+                      str(data.get("notes", "")),
+                      sha256=str(data.get("sha256", "")))
 
 
 def _parse_github_release(data: dict) -> UpdateInfo:
     version = str(data.get("tag_name") or data.get("name") or "")
-    url = ""
+    exe_urls, sha256_url = [], ""
     for asset in data.get("assets", []):
-        if str(asset.get("name", "")).lower().endswith(".exe"):
-            url = str(asset.get("browser_download_url", ""))
-            if "potsync" in str(asset.get("name", "")).lower():
-                break
+        name = str(asset.get("name", "")).lower()
+        dl = str(asset.get("browser_download_url", ""))
+        if name.endswith(".sha256"):
+            sha256_url = dl
+        elif name.endswith(".exe"):
+            exe_urls.append(dl)
+    pot = [u for u in exe_urls if "potsync" in u.lower()]
+    url = (pot or exe_urls or [""])[0]      # 优先名字含 potsync 的 exe
     if not version or not url:
         raise ValueError("Release 中未找到版本号或 exe 资产")
-    return UpdateInfo(version, url, str(data.get("body", "")))
+    return UpdateInfo(version, url, str(data.get("body", "")),
+                      sha256_url=sha256_url)
 
 
 def configured_source(cfg: dict) -> Optional[str]:
@@ -119,10 +128,72 @@ def check_for_update(cfg: dict) -> Optional[UpdateInfo]:
     return info if is_newer(info.version) else None
 
 
+def _http_text(url: str) -> str:
+    """下载小文本文件（校验和等）；github.com 地址自动尝试镜像。"""
+    from tunnel import _candidate_urls
+    last: Optional[Exception] = None
+    for candidate in _candidate_urls(url):
+        try:
+            req = urllib.request.Request(
+                candidate, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as exc:            # 换下一个镜像
+            last = exc
+    raise RuntimeError(f"校验和下载失败: {last}")
+
+
+def _parse_sha256_text(text: str) -> str:
+    """从 sha256sum 格式文本（'<hash>  <文件名>'）提取 64 位 hex 校验和。"""
+    token = (text or "").strip().split()[0].strip().lower() if text.strip() else ""
+    if len(token) == 64 and all(c in "0123456789abcdef" for c in token):
+        return token
+    raise ValueError("校验和文件格式异常")
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _expected_sha256(info: UpdateInfo) -> str:
+    """解析期望校验和：优先内联字段，其次 sha256_url 文本；拿不到返回 ""。"""
+    direct = (info.sha256 or "").strip().lower()
+    if direct:
+        return direct
+    if info.sha256_url:
+        try:
+            return _parse_sha256_text(_http_text(info.sha256_url))
+        except Exception as exc:
+            log.warning("获取校验和失败，本次跳过校验: %s", exc)
+    return ""
+
+
 def download_update(info: UpdateInfo, dst: Path,
                     status: Optional[Callable[[str], None]] = None) -> Path:
-    """断点续传下载新版本 exe（复用隧道模块的多镜像下载器）。"""
+    """断点续传下载新版本 exe（复用隧道模块的多镜像下载器）。
+
+    完整性保障：发布方附带 .sha256 时，下载后必校验；校验失败删除残留
+    从头重新下载一次，仍失败则抛错——绝不让损坏的包进入替换重启流程
+    （历史上"续传拼接了旧版本残留临时文件"会导致新 exe 启动即报
+    Failed to extract / decompression return code -3）。
+    """
+    expected = _expected_sha256(info)
     _download_file(info.url, dst, status=status, expected_min=1_000_000)
+    if expected and _file_sha256(dst) != expected:
+        log.warning("更新包校验失败，删除残留并重新完整下载")
+        if status:
+            status("校验失败，重新完整下载…")
+        dst.unlink(missing_ok=True)
+        _download_file(info.url, dst, status=status, expected_min=1_000_000)
+        if _file_sha256(dst) != expected:
+            dst.unlink(missing_ok=True)
+            raise RuntimeError("更新包校验失败（重试后仍不一致），"
+                               "请稍后再试或到发布页手动下载")
     return dst
 
 

@@ -24,6 +24,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -189,6 +190,21 @@ def _download_file(url: str, dst: Path,
             if pos >= expected_min:
                 return
             raise RuntimeError(f"下载文件过小（{pos}B），疑似镜像异常")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and pos:
+                # 续传起点超出远端文件大小（多为旧版本残留的临时文件）：
+                # 丢弃本地残留，从头重新下载
+                log.debug("续传位置无效(416 @%dB)，重新完整下载", pos)
+                pos = 0
+                dst.unlink(missing_ok=True)
+                if status:
+                    status("检测到残留文件异常，重新下载…")
+                time.sleep(1)
+                continue
+            log.debug("下载中断(%s @%dB): %s", candidate, pos, exc)
+            if status:
+                status("下载中断，切换镜像源续传…")
+            time.sleep(1)
         except Exception as exc:
             log.debug("下载中断(%s @%dB): %s", candidate, pos, exc)
             if status:

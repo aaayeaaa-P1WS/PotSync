@@ -208,9 +208,12 @@ class MainWindow(QMainWindow):
 
     def _download_and_apply(self, info: "updater.UpdateInfo") -> None:
         import threading
-        new_exe = Path(sys.executable).with_name("PotSync-new.exe") \
+        # 临时文件名带版本号：避免续传拼接到旧版本残留的临时文件（会损坏新包）
+        safe_ver = "".join(c if (c.isalnum() or c in ".-") else "_"
+                           for c in info.version)
+        new_exe = Path(sys.executable).with_name(f"PotSync-{safe_ver}.exe") \
             if getattr(sys, "frozen", False) \
-            else Path.home() / ".potsync" / "PotSync-new.exe"
+            else Path.home() / ".potsync" / f"PotSync-{safe_ver}.exe"
         self.status.showMessage("正在下载新版本…", 10000)
         self.btnUpdate.setEnabled(False)
 

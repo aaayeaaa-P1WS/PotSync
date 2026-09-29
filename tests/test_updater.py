@@ -31,6 +31,7 @@ import updater  # noqa: E402
 from version import APP_VERSION  # noqa: E402
 
 ROUTES: dict = {}
+RANGE_ROUTES: set = set()   # 这些路径支持 Range（206 / 416），模拟真实镜像
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -38,6 +39,23 @@ class _Handler(BaseHTTPRequestHandler):
         body = ROUTES.get(self.path)
         if body is None:
             self.send_error(404)
+            return
+        rng = self.headers.get("Range")
+        if rng and self.path in RANGE_ROUTES:
+            try:
+                start = int(rng.split("=", 1)[1].split("-", 1)[0])
+            except (IndexError, ValueError):
+                self.send_error(400)
+                return
+            if start >= len(body):
+                self.send_error(416)        # 续传起点超出文件大小
+                return
+            self.send_response(206)
+            self.send_header("Content-Range",
+                             f"bytes {start}-{len(body) - 1}/{len(body)}")
+            self.send_header("Content-Length", str(len(body) - start))
+            self.end_headers()
+            self.wfile.write(body[start:])
             return
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -77,20 +95,30 @@ def main() -> int:
                {"name": "other-tool.exe",
                 "browser_download_url": "http://x/other.exe"},
                {"name": "PotSync.exe",
-                "browser_download_url": "http://x/PotSync.exe"}]}
+                "browser_download_url": "http://x/PotSync.exe"},
+               {"name": "PotSync.exe.sha256",
+                "browser_download_url": "http://x/PotSync.exe.sha256"}]}
     info = updater._parse_github_release(rel)
     assert info.version == "v2.1.0"
     assert info.url.endswith("PotSync.exe")          # 优先名字含 potsync 的资产
     assert info.notes == "修复若干问题"
+    assert info.sha256_url.endswith("PotSync.exe.sha256")   # 识别校验和资产
     rel2 = dict(rel, assets=[{"name": "other-tool.exe",
                               "browser_download_url": "http://x/other.exe"}])
-    assert updater._parse_github_release(rel2).url.endswith("other.exe")
+    info2 = updater._parse_github_release(rel2)
+    assert info2.url.endswith("other.exe")
+    assert info2.sha256_url == ""
     try:
         updater._parse_github_release({"tag_name": "v1", "assets": []})
         raise AssertionError("无 exe 资产应抛 ValueError")
     except ValueError:
         pass
-    print("PASS  version.json / GitHub Release 响应解析（缺字段报错、优先 PotSync.exe 资产）")
+    # version.json 可内联 sha256
+    info3 = updater._parse_version_json(
+        {"version": "2.0.0", "url": "http://x/PotSync.exe",
+         "sha256": "ab" * 32})
+    assert info3.sha256 == "ab" * 32
+    print("PASS  version.json / GitHub Release 响应解析（缺字段报错、优先 PotSync.exe 资产、识别校验和）")
 
     # ---------- 本地 HTTP 服务器实测 ----------
     fake_exe = b"MZ" + b"\0" * 1_200_000            # >1MB，满足 expected_min
@@ -168,6 +196,53 @@ def main() -> int:
         assert seen, "下载进度回调应被调用"
         dst.unlink()
         print("PASS  download_update 下载落地（1.2MB 内容一致 + 进度回调）")
+
+        # ---------- 完整性校验 ----------
+        import hashlib
+        good_hash = hashlib.sha256(fake_exe).hexdigest()
+        bad_exe = b"MZ" + b"\xFF" * 1_200_000
+        ROUTES["/PotSync.exe.sha256"] = f"{good_hash}  PotSync.exe\n".encode()
+        ROUTES["/bad.exe"] = bad_exe
+        RANGE_ROUTES.update({"/PotSync.exe", "/bad.exe"})
+
+        # 1) 带 sha256 的正常下载：校验通过
+        dst.unlink(missing_ok=True)
+        updater.download_update(
+            updater.UpdateInfo("99.0.0", f"{base}/PotSync.exe",
+                               sha256_url=f"{base}/PotSync.exe.sha256"), dst)
+        assert dst.read_bytes() == fake_exe
+        dst.unlink()
+        print("PASS  校验通过：sha256 与文件一致")
+
+        # 2) 旧版本脏残留自愈：残留头部是错误字节，续传拼接后校验失败
+        #    → 自动删除并从头完整下载，最终内容必须完好
+        dst.write_bytes(b"\x00" * 600_000)       # 错误头部（假残留）
+        updater.download_update(
+            updater.UpdateInfo("99.0.0", f"{base}/PotSync.exe",
+                               sha256_url=f"{base}/PotSync.exe.sha256"), dst)
+        assert dst.read_bytes() == fake_exe, "脏残留拼接后应自愈为完整文件"
+        dst.unlink()
+        print("PASS  脏残留自愈：续传拼接损坏 → 校验失败 → 重新完整下载")
+
+        # 3) 持续损坏（镜像劫持/文件被改）：重试后仍不一致 → 报错且不替换
+        dst.unlink(missing_ok=True)
+        try:
+            updater.download_update(
+                updater.UpdateInfo("99.0.0", f"{base}/bad.exe",
+                                   sha256=good_hash), dst)
+            raise AssertionError("持续损坏应抛 RuntimeError")
+        except RuntimeError as exc:
+            assert "校验失败" in str(exc)
+        assert not dst.exists(), "校验失败的文件必须删除，不得进入替换流程"
+        print("PASS  持续损坏防护：重试仍不一致则报错，残留已删除")
+
+        # 4) 残留比新文件还大：服务器 416 → 自动从头完整下载
+        dst.write_bytes(b"\x00" * (len(fake_exe) + 5000))
+        updater.download_update(
+            updater.UpdateInfo("99.0.0", f"{base}/PotSync.exe"), dst)
+        assert dst.read_bytes() == fake_exe, "416 后应重新完整下载"
+        dst.unlink()
+        print("PASS  416 处理：续传起点超出文件大小 → 从头重新下载")
     finally:
         srv.shutdown()
         srv.server_close()

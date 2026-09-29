@@ -117,6 +117,33 @@ def find_media_in_dir(dirpath: str, target_norm: str) -> str:
     return ""
 
 
+def parse_dpl(path: str) -> dict:
+    """解析 PotPlayer 播放列表文件（.dpl，UTF-8 带 BOM 的文本）。
+
+    格式：首行 DAUMPLAYLIST；playname=<当前播放项完整路径>；
+    N*file*<完整路径> 为列表第 N 项（可能穿插 N*duration2* / N*start* 等行）。
+    返回 {"playname": str, "files": [str, ...]}；读不到/格式不符返回空。
+    """
+    playname, files = "", []
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+            text = f.read(2 << 20)          # 列表文件很小，防御性截断
+    except OSError:
+        return {"playname": "", "files": []}
+    if not text.startswith("DAUMPLAYLIST"):
+        return {"playname": "", "files": []}
+    for line in text.splitlines():
+        if line.startswith("playname="):
+            playname = line[len("playname="):].strip()
+            continue
+        m = re.match(r"^\d+\*file\*(.*)$", line)
+        if m:
+            p = m.group(1).strip()
+            if p:
+                files.append(p)
+    return {"playname": playname, "files": files}
+
+
 @dataclass
 class Snapshot:
     """一次本地播放器状态采样。position/duration 单位毫秒。"""
@@ -340,21 +367,95 @@ class PotPlayerBridge:
         return paths
 
     def current_media_path(self) -> str:
-        """PotPlayer 当前正在播放文件的完整路径（定位不到返回 ""）。"""
+        """PotPlayer 当前正在播放文件的完整路径（定位不到返回 ""）。
+
+        首选播放列表文件（.dpl）记录的当前项——便宜、且不受"标题栏显示
+        内嵌元数据标题而非文件名"影响；记录滞后（与标题不符）时回退到
+        系统句柄枚举。
+        """
+        cur = normalize_media(self.media_name())
+        try:
+            pn = self.current_playname()
+        except Exception as exc:
+            log.debug("读取播放列表当前项失败: %s", exc)
+            pn = ""
+        if pn and os.path.exists(pn):
+            if not cur or normalize_media(os.path.basename(pn)) == cur:
+                return pn
         try:
             paths = self.open_media_paths()
         except Exception as exc:
             log.debug("枚举句柄失败: %s", exc)
-            return ""
+            return pn if pn and os.path.exists(pn) else ""
         if not paths:
-            return ""
-        cur = normalize_media(self.media_name())
+            return pn if pn and os.path.exists(pn) else ""
         if cur:
             for p in paths:
                 if normalize_media(os.path.basename(p)) == cur:
                     return p
         if len(paths) == 1:       # 只打开了一个视频：即是它
             return paths[0]
+        return ""
+
+    # ---------- 播放列表文件（.dpl） ----------
+
+    def _playlist_dirs(self) -> list:
+        """候选 Playlist 目录：便携版（exe 旁）优先，再 %APPDATA% 64/32 位。"""
+        dirs = []
+        exe = self.exe_path()
+        if exe:
+            dirs.append(os.path.join(os.path.dirname(exe), "Playlist"))
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            dirs.append(os.path.join(appdata, "PotPlayerMini64", "Playlist"))
+            dirs.append(os.path.join(appdata, "PotPlayer", "Playlist"))
+        return dirs
+
+    def _dpl_files(self) -> list:
+        """所有 .dpl 文件（按修改时间新→旧）。"""
+        dpls = []
+        for d in self._playlist_dirs():
+            try:
+                for name in os.listdir(d):
+                    if name.lower().endswith(".dpl"):
+                        full = os.path.join(d, name)
+                        try:
+                            dpls.append((os.path.getmtime(full), full))
+                        except OSError:
+                            pass
+            except OSError:
+                continue
+        dpls.sort(reverse=True)
+        return [p for _, p in dpls]
+
+    def current_playname(self) -> str:
+        """最新 .dpl 记录的当前播放项完整路径（可能略滞后于真实状态）。"""
+        for full in self._dpl_files():
+            pn = parse_dpl(full)["playname"]
+            if pn:
+                return pn
+        return ""
+
+    def playlist_files(self) -> list:
+        """PotPlayer 播放列表中的全部视频文件完整路径（.dpl 新的优先，去重）。"""
+        seen, out = set(), []
+        for full in self._dpl_files():
+            for p in parse_dpl(full)["files"]:
+                if os.path.splitext(p)[1].lower() in VIDEO_EXTS \
+                        and p not in seen:
+                    seen.add(p)
+                    out.append(p)
+        return out
+
+    def find_in_playlist(self, target_norm: str) -> str:
+        """在播放列表各项中找同名（规范化）视频文件。
+        返回完整路径；文件已不存在/找不到返回 ""。"""
+        if not target_norm:
+            return ""
+        for p in self.playlist_files():
+            if normalize_media(os.path.basename(p)) == target_norm \
+                    and os.path.exists(p):
+                return p
         return ""
 
     def open_file(self, path: str) -> bool:

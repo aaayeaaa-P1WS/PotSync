@@ -18,6 +18,8 @@
    后续同媒体状态不再重复轮巡（失败缓存）
 6. 同目录直开：定位当前文件完整路径 → 同目录找同名文件直接打开，
    零轮巡一次切换到位（场景⑨）
+7. 播放列表文件匹配：同目录没有时，直接解析 PotPlayer 播放列表文件
+   （.dpl）拿到各项完整路径精准打开（场景⑩）
 
 运行：python tests/test_follow.py
 """
@@ -365,6 +367,76 @@ def main() -> int:
                 fake_g.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 fake_g.kill()
+
+        # ⑩ 播放列表文件匹配：同目录没有目标，但 .dpl 记录的各项里有 → 精准直开
+        from pot_bridge import parse_dpl
+        # parse_dpl 单测：BOM / playname / N*file* / 忽略 duration/start 行
+        dpl_path = os.path.join(tmpdir, "PotPlayerMini64.dpl")
+        with open(dpl_path, "w", encoding="utf-8-sig", newline="") as f:
+            f.write("DAUMPLAYLIST\r\n")
+            f.write(f"playname={tmpdir2}\\ep03.mkv\r\n")
+            f.write("topindex=0\r\nsaveplaypos=0\r\n")
+            f.write(f"1*file*{tmpdir}\\ep01.mkv\r\n")
+            f.write("1*duration2*1420063\r\n1*start*3043\r\n")
+            f.write(f"2*file*{tmpdir}\\ep02.mkv\r\n")
+            f.write("3*file*D:\\音乐\\song.mp3\r\n")      # 非视频项
+        parsed = parse_dpl(dpl_path)
+        assert parsed["playname"].lower().endswith("ep03.mkv")
+        assert len(parsed["files"]) == 3
+        assert parsed["files"][0].endswith("ep01.mkv")
+        assert parse_dpl(os.path.join(tmpdir, "note.txt"))["files"] == []
+        assert parse_dpl(r"X:\不存在的\none.dpl")["files"] == []
+        print("PASS  .dpl 解析：BOM/playname/列表项/非视频保留/坏文件容错")
+
+        class PlBridge(PotPlayerBridge):
+            """当前文件在一个没有目标的目录，但播放列表里有目标文件。"""
+            def __init__(self, classes, cur_path, pl_entries):
+                super().__init__(classes)
+                self._cur_path = cur_path
+                self._pl = pl_entries
+                self.opened = []
+
+            def current_media_path(self):
+                return self._cur_path
+
+            def playlist_files(self):
+                return list(self._pl)
+
+            def open_file(self, path):
+                self.opened.append(path)
+                win32gui.SetWindowText(
+                    self.find_window(), os.path.basename(path) + " - PotPlayer")
+                return True
+
+        other_dir = tempfile.mkdtemp(prefix="potsync_other_")
+        open(os.path.join(other_dir, "ep03.mkv"), "w").close()   # 只有 ep03
+        fake_h = subprocess.Popen(
+            [sys.executable, str(FAKE), "--class", "FakePotPlH", "--paused",
+             "--playlist", "ep03.mkv:620000"])
+        try:
+            bridge_h = PlBridge(
+                ("FakePotPlH",), os.path.join(other_dir, "ep03.mkv"),
+                [os.path.join(tmpdir, "ep01.mkv"),
+                 os.path.join(tmpdir, "ep02.mkv"),
+                 os.path.join(tmpdir, "ep03.mkv")])
+            assert wait_for(bridge_h.available, desc="播放列表场景假播放器启动")
+            eng_h = SyncEngine(bridge_h, NetClient())
+            eng_h._start_media_follow({"media": "ep01.mkv", "action": "open",
+                                       "paused": True, "position": 3000,
+                                       "duration": 600000, "ts": 0})
+            assert bridge_h.opened == [os.path.join(tmpdir, "ep01.mkv")], \
+                f"未按播放列表精准直开: {bridge_h.opened}"
+            assert eng_h._search is None, "播放列表直开成功不应进入轮巡"
+            ok = wait_for(lambda: media_matches(bridge_h.media_name(), "ep01.mkv")
+                          and bridge_h.position_ms() == 3000, 8, "直开后对齐")
+            assert ok, f"直开后未对齐: {bridge_h.media_name()!r}"
+            print("PASS  播放列表文件匹配：同目录没有 → 读 .dpl 各项精准直开，零轮巡")
+        finally:
+            fake_h.terminate()
+            try:
+                fake_h.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                fake_h.kill()
 
         print("\n全部通过 ✔")
         return 0

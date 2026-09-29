@@ -38,9 +38,10 @@ DRIFT_CORRECT_MS = 2800     # 漂移校准阈值
 GUARD_SECONDS = 2.0         # 应用远程状态后的静默期（避免把"自己执行远程指令"误判为本地操作）
 MEDIA_DIFF_MS = 1500        # 总时长差超过此值认为双方媒体不一致
 
-# 文件名自动匹配：优先"同目录直开"（枚举 PotPlayer 句柄拿到当前文件完整路径，
-# 在同目录找同名文件直接启动播放器打开，等价用户双击，单次切换零轮巡）；
-# 同目录找不到时才回退到播放列表轮巡。轮巡是兜底路径，节奏放得更温和：
+# 文件名自动匹配：优先"零轮巡直开"——不经过播放器逐集试探，直接在文件系统
+# 层面定位同名文件（当前文件同目录 → PotPlayer 播放列表文件 .dpl → 已学习
+# 目录），找到后启动 PotPlayer 打开，等价用户双击，单次切换零压力；
+# 全部找不到时才回退到播放列表轮巡。轮巡是兜底路径，节奏放得更温和：
 # 真实 PotPlayer 打开文件需要 0.5~3 秒；切换命令必须等标题真正变化、且文件
 # 加载就绪（时长可用）后再发下一条，否则命令在播放器消息队列里堆积，
 # 会把 PotPlayer 刷成"未响应"甚至空指针崩溃。
@@ -384,10 +385,15 @@ class SyncEngine(QObject):
         del self._media_dirs[8:]
 
     def _try_direct_match(self, target: str, s: dict) -> bool:
-        """零轮巡直开：枚举 PotPlayer 句柄拿到当前文件完整路径 → 同目录找
-        同名文件 → 直接启动 PotPlayer 打开（等价用户双击，单次切换，对播放器
-        零压力）。成功返回 True；无法定位/未找到/打开失败返回 False，
-        调用方回退到播放列表轮巡。"""
+        """零轮巡直开：不经过播放器逐集试探，直接在文件系统层面定位同名
+        文件并让 PotPlayer 打开（等价用户双击，单次切换，对播放器零压力）。
+
+        查找顺序（全部毫秒级）：
+        1. 当前文件所在目录（剧集通常同文件夹，当前路径来自 .dpl 当前项
+           或系统句柄枚举）；
+        2. PotPlayer 播放列表文件（.dpl）记录的各项完整路径；
+        3. 本次会话已学习的媒体目录。
+        成功返回 True；都找不到/打开失败返回 False，调用方回退轮巡。"""
         norm = normalize_media(target)
         if not norm or norm == self._direct_failed:
             return False
@@ -404,7 +410,14 @@ class SyncEngine(QObject):
             if hit:
                 break
         if not hit:
+            try:
+                hit = self.bridge.find_in_playlist(norm)
+            except Exception as exc:
+                log.debug("find_in_playlist 失败: %s", exc)
+                hit = ""
+        if not hit:
             return False
+        self._learn_path(os.path.dirname(hit))
         return self._open_matched(hit, s)
 
     def _open_matched(self, path: str, s: dict) -> bool:

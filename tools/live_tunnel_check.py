@@ -66,39 +66,39 @@ def main() -> int:
         on_ready=lambda ep: (holder.update(ep=ep), ready.set()),
         on_error=lambda e: (holder.update(err=e), ready.set()),
         on_status=lambda s: print(f"[隧道] {s}", flush=True))
-
     server = EmbeddedServer("127.0.0.1", LOCAL_PORT)
-    server.start()
-    time.sleep(1)
-    assert server.running, "内嵌服务器未启动"
-    print("PASS  内嵌中继服务器启动（127.0.0.1:%d）" % LOCAL_PORT)
+    try:
+        server.start()
+        time.sleep(1)
+        assert server.running, "内嵌服务器未启动"
+        print("PASS  内嵌中继服务器启动（127.0.0.1:%d）" % LOCAL_PORT)
 
-    print("建立公网隧道（首次需下载组件，请稍候）…")
-    mgr.start(LOCAL_PORT)
-    if not ready.wait(90):
-        print("FAIL  隧道建立超时")
-        return 1
-    if "err" in holder:
-        print(f"FAIL  隧道失败: {holder['err']}")
-        return 1
+        print("建立公网隧道（首次需下载组件，请稍候）…")
+        mgr.start(LOCAL_PORT)
+        if not ready.wait(240):
+            print("FAIL  隧道建立超时")
+            return 1
+        if "err" in holder:
+            print(f"FAIL  隧道失败: {holder['err']}")
+            return 1
 
-    ep = holder["ep"]
-    print(f"PASS  公网隧道已建立: {ep.display}  ({ep.provider})")
+        ep = holder["ep"]
+        print(f"PASS  公网隧道已建立: {ep.display}  ({ep.provider})")
 
-    # HTTP 健康检查（cloudflared 走 https；bore 是纯 TCP 无 HTTP）
-    if ep.provider == "cloudflared":
-        body = urllib.request.urlopen(f"https://{ep.host}/", timeout=15) \
-            .read().decode().strip()
-        assert "PotSync" in body, body
-        print(f"PASS  公网 HTTP 健康检查: {body!r}")
+        # HTTP 健康检查（cloudflared 走 https；bore 是纯 TCP 无 HTTP）
+        if ep.provider == "cloudflared":
+            body = urllib.request.urlopen(f"https://{ep.host}/", timeout=15) \
+                .read().decode().strip()
+            assert "PotSync" in body, body
+            print(f"PASS  公网 HTTP 健康检查: {body!r}")
 
-    asyncio.run(ws_roundtrip(build_uri(ep.host, ep.port)))
-
-    mgr.stop()
-    server.stop()
-    server.wait_stopped(3)
-    print("\n穿透联调全部通过 ✔")
-    return 0
+        asyncio.run(ws_roundtrip(build_uri(ep.host, ep.port)))
+        print("\n穿透联调全部通过 ✔")
+        return 0
+    finally:
+        mgr.stop()
+        server.stop()
+        server.wait_stopped(3)
 
 
 if __name__ == "__main__":

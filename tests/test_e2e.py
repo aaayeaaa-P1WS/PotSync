@@ -18,6 +18,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -55,6 +56,16 @@ def wait_for(pred, timeout: float = 10.0, desc: str = "") -> bool:
 
 
 def main() -> int:
+    media_tmp = tempfile.TemporaryDirectory(prefix="potsync_e2e_")
+    media_dir = Path(media_tmp.name)
+    names = ("ep01.mkv", "ep02.mkv", "ep03.mkv")
+    for name in names:
+        (media_dir / name).touch()
+    dpl = media_dir / "list.dpl"
+    dpl.write_text("DAUMPLAYLIST\n" + "".join(
+        f"{i}*file*{media_dir / name}\n" for i, name in enumerate(names, 1)),
+        encoding="utf-8-sig")
+
     server = subprocess.Popen(
         [sys.executable, str(SERVER), "--host", HOST, "--port", str(PORT),
          "--log-level", "WARNING"])
@@ -68,6 +79,24 @@ def main() -> int:
         # 独立类名，避免与本机真实运行的 PotPlayer 冲突
         bridge_a = PotPlayerBridge(("FakePotE2EA",))
         bridge_b = PotPlayerBridge(("FakePotE2EB",))
+        bridge_b._dpl_files = lambda: [str(dpl)]
+        bridge_b.current_media_path = lambda: str(media_dir / bridge_b.media_name())
+        direct_opens = []
+
+        def open_in_fake(path):
+            """假播放器没有 exe：用单次导航模拟 /current 打开索引给出的路径。"""
+            pair = (bridge_b.media_name(), os.path.basename(path))
+            command = {("ep01.mkv", "ep02.mkv"): bridge_b.next,
+                       ("ep02.mkv", "ep01.mkv"): bridge_b.previous}.get(pair)
+            if command is None or Path(path).parent != media_dir:
+                return False
+            if not command():
+                return False
+            direct_opens.append(path)
+            return True
+
+        bridge_b.open_file = open_in_fake
+        assert bridge_b.find_in_playlist("ep02") == str(media_dir / "ep02.mkv")
         assert wait_for(lambda: bridge_a.available() and bridge_b.available(),
                         desc="假播放器启动")
         print("PASS  两个假播放器就绪")
@@ -172,7 +201,10 @@ def main() -> int:
                       "B 跟随上一集")
         assert ok, f"B 未跟随上一集: {bridge_b.media_name()!r}"
         assert bridge_b.duration_ms() == 600000
-        print(f"PASS  切集同步（上一集）: B 当前 {bridge_b.media_name()!r}")
+        assert direct_opens == [str(media_dir / "ep02.mkv"),
+                                str(media_dir / "ep01.mkv")]
+        print(f"PASS  切集同步（上一集）: B 当前 {bridge_b.media_name()!r}，"
+              "两次均由 .dpl 索引直接定位")
 
         print("\n全部通过 ✔")
         return 0

@@ -20,6 +20,7 @@ TunnelManager 在独立线程中管理下载、启动、输出解析与进程回
 from __future__ import annotations
 
 import logging
+import queue
 import re
 import subprocess
 import threading
@@ -34,6 +35,7 @@ log = logging.getLogger("potsync.tunnel")
 
 BIN_DIR = Path.home() / ".potsync" / "bin"
 STARTUP_TIMEOUT = 35          # 等待隧道给出公网地址的最长秒数
+PUBLIC_ENDPOINT_TIMEOUT = 120  # 实测新域名 DNS 可能超过 60 秒才生效
 
 CLOUDFLARED_URL = ("https://github.com/cloudflare/cloudflared/releases/"
                    "latest/download/cloudflared-windows-amd64.exe")
@@ -66,6 +68,7 @@ class TunnelProvider:
     """一种隧道方式：二进制获取 + 启动命令 + 输出解析。"""
 
     name = "base"
+    requires_registration = False
 
     def binary(self) -> Path:
         raise NotImplementedError
@@ -87,9 +90,14 @@ class TunnelProvider:
     def parse_line(self, line: str) -> Optional[PublicEndpoint]:
         raise NotImplementedError
 
+    def registration_ready(self, line: str) -> bool:
+        """公网地址之外，是否还要求底层隧道先注册到服务商。"""
+        return True
+
 
 class CloudflaredProvider(TunnelProvider):
     name = "cloudflared"
+    requires_registration = True
 
     def binary(self) -> Path:
         return BIN_DIR / "cloudflared.exe"
@@ -109,6 +117,11 @@ class CloudflaredProvider(TunnelProvider):
         if m:
             return PublicEndpoint(m.group(1), 443, self.name)
         return None
+
+    def registration_ready(self, line: str) -> bool:
+        # 地址会在边缘连接注册前打印。过早访问会触发代理 TLS 错误或本地
+        # DNS 负缓存，造成明明隧道已注册却仍长时间等待。
+        return "Registered tunnel connection" in line
 
 
 class BoreProvider(TunnelProvider):
@@ -134,6 +147,9 @@ class BoreProvider(TunnelProvider):
         return [str(exe), "local", str(local_port), "--to", "bore.pub"]
 
     def parse_line(self, line: str) -> Optional[PublicEndpoint]:
+        # 错误日志也含 bore.pub:7835；只接受明确的成功监听行。
+        if not re.search(r"\blistening\s+at\b", line, re.IGNORECASE):
+            return None
         m = BORE_RE.search(line)
         if m:
             return PublicEndpoint(m.group(1), int(m.group(2)), self.name)
@@ -270,43 +286,88 @@ class TunnelManager:
             try:
                 endpoint = self._run_provider(provider, local_port)
             except Exception as exc:
+                if self._stopped.is_set():
+                    return
                 log.warning("%s 隧道失败: %s", provider.name, exc)
                 errors.append(f"{provider.name}: {exc}")
                 continue
-            if endpoint is None:
-                errors.append(f"{provider.name}: 启动超时")
-                continue
+            if endpoint is None or self._stopped.is_set():
+                return
             if not self._verify_endpoint(endpoint):
                 self._kill_current()
-                errors.append(f"{provider.name}: 公网地址未生效")
+                if self._stopped.is_set():
+                    return
+                detail = getattr(self, "_verification_error", "未知原因")
+                errors.append(f"{provider.name}: 公网地址未生效（{detail}）")
                 continue
             self.endpoint = endpoint
             self._on_ready(endpoint)
             return
-        self._on_error("；".join(errors) or "所有隧道方式均失败")
+        if not self._stopped.is_set():
+            self._on_error("；".join(errors) or "所有隧道方式均失败")
+
+    @staticmethod
+    def _open_public_url(req, timeout: int, direct: bool):
+        """公网预检同时支持直连和系统代理，便于与实际客户端路径互备。"""
+        if direct:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            return opener.open(req, timeout=timeout)
+        return urllib.request.urlopen(req, timeout=timeout)
 
     def _verify_endpoint(self, endpoint: PublicEndpoint) -> bool:
-        """等待公网地址真正可用（DNS 记录生效可能有数秒延迟），最长 40 秒。"""
-        self._on_status("隧道已建立，等待公网地址生效…")
-        deadline = time.time() + 40
-        while time.time() < deadline and not self._stopped.is_set():
-            try:
-                if endpoint.provider == "cloudflared":
-                    req = urllib.request.Request(
-                        f"https://{endpoint.host}/",
-                        headers={"User-Agent": "PotSync/1.0"})
-                    with urllib.request.urlopen(req, timeout=8) as resp:
-                        body = resp.read(256)
-                    if b"PotSync" in body:
-                        return True
-                else:
+        """注册完成后验证公网入口；直连与系统代理任一可用即可。"""
+        self._on_status("隧道连接已就绪，验证公网入口…")
+        started = time.monotonic()
+        deadline = started + PUBLIC_ENDPOINT_TIMEOUT
+        last_error = "尚未收到公网响应"
+        next_progress = started + 10
+        attempt = 0
+        while time.monotonic() < deadline and not self._stopped.is_set():
+            proc = self._proc
+            if proc is not None and proc.poll() is not None:
+                last_error = f"隧道进程已退出（退出码 {proc.returncode}）"
+                self._verification_error = last_error
+                log.warning("%s 公网校验中止：%s", endpoint.host, last_error)
+                return False
+            attempt += 1
+            if endpoint.provider == "cloudflared":
+                route_errors = []
+                for route, direct in (("直连", True), ("系统代理", False)):
+                    try:
+                        req = urllib.request.Request(
+                            f"https://{endpoint.host}/",
+                            headers={"User-Agent": "PotSync/1.0"})
+                        with self._open_public_url(req, timeout=8, direct=direct) as resp:
+                            body = resp.read(256)
+                        if b"PotSync" in body:
+                            elapsed = time.monotonic() - started
+                            log.info("%s 公网校验通过（%s），用时 %.1f 秒",
+                                     endpoint.host, route, elapsed)
+                            return True
+                        route_errors.append(f"{route}: 公网响应不是 PotSync 中继服务")
+                        log.debug("公网校验返回非中继内容: %r", body[:160])
+                    except Exception as exc:
+                        route_errors.append(f"{route}: {type(exc).__name__}: {exc}")
+                last_error = "；".join(route_errors)
+            else:
+                try:
                     import socket as _sock
                     with _sock.create_connection((endpoint.host, endpoint.port),
                                                  timeout=8):
                         return True
-            except Exception:
-                pass
-            time.sleep(2)
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+            log.debug("公网校验第 %d 次失败: %s", attempt, last_error)
+            now = time.monotonic()
+            if now >= next_progress:
+                self._on_status(
+                    f"等待公网地址生效… 已等待 {int(now - started)} 秒；"
+                    f"最近结果：{last_error}")
+                next_progress = now + 10
+            self._stopped.wait(min(2, max(0, deadline - now)))
+        self._verification_error = last_error
+        if not self._stopped.is_set():
+            log.warning("%s 公网校验超时: %s", endpoint.host, last_error)
         return False
 
     def _run_provider(self, provider: TunnelProvider,
@@ -320,51 +381,96 @@ class TunnelManager:
             text=True, encoding="utf-8", errors="replace", bufsize=1,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self._proc = proc
-        deadline = time.time() + STARTUP_TIMEOUT
+        deadline = time.monotonic() + STARTUP_TIMEOUT
         endpoint: Optional[PublicEndpoint] = None
+        output = queue.Queue()
+        # 单独读管道：即使进程完全静默，主线程仍能执行超时与退出检查。
+        reader = threading.Thread(target=self._read_output, args=(proc, output),
+                                  name=f"potsync-{provider.name}-output", daemon=True)
+        reader.start()
+        tail = []
+        candidate: Optional[PublicEndpoint] = None
         try:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                if self._stopped.is_set():
-                    return None
+            while not self._stopped.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stage = "完成隧道注册" if candidate is not None else "获取到公网地址"
+                    raise TimeoutError(f"{STARTUP_TIMEOUT} 秒内未{stage}")
+                if proc.poll() is not None and output.empty():
+                    detail = "；".join(tail[-3:]) or "无输出"
+                    raise RuntimeError(
+                        f"隧道进程提前退出（{proc.returncode}）：{detail}")
+                try:
+                    line = output.get(timeout=min(0.25, remaining))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    detail = "；".join(tail[-3:]) or "无输出"
+                    try:
+                        returncode = proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        returncode = None
+                    state = (f"退出码 {returncode}" if returncode is not None
+                             else "进程仍在运行")
+                    raise RuntimeError(f"隧道输出已结束（{state}）：{detail}")
                 line = line.strip()
                 if line:
                     log.debug("[%s] %s", provider.name, line)
-                endpoint = provider.parse_line(line)
-                if endpoint is not None:
-                    break
-                if time.time() > deadline:
-                    return None
-            return endpoint
+                    tail.append(line)
+                    del tail[:-8]
+                if candidate is None:
+                    candidate = provider.parse_line(line)
+                    if candidate is not None and provider.requires_registration:
+                        self._on_status("公网地址已分配，等待隧道连接注册…")
+                if candidate is not None and provider.registration_ready(line):
+                    endpoint = candidate
+                    return endpoint
+            return None
         finally:
             if endpoint is None:
-                # 失败/超时：回收进程
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                self._terminate_process(proc)
                 if self._proc is proc:
                     self._proc = None
+                reader.join(timeout=1)
             else:
-                # 成功：保留隧道进程，后台排空日志防止管道写满阻塞
-                threading.Thread(target=self._drain, args=(proc,),
+                # 保活进程，同时继续排空日志队列，避免长跑后内存增长。
+                threading.Thread(target=self._drain_output, args=(output,),
+                                 name=f"potsync-{provider.name}-drain",
                                  daemon=True).start()
 
     @staticmethod
-    def _drain(proc: subprocess.Popen) -> None:
+    def _drain_output(output: queue.Queue) -> None:
+        while True:
+            try:
+                if output.get() is None:
+                    return
+            except Exception:
+                return
+
+    @staticmethod
+    def _read_output(proc: subprocess.Popen, output: queue.Queue) -> None:
         try:
-            for _ in proc.stdout:
-                pass
-        except Exception:
-            pass
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                output.put(line)
+        except Exception as exc:
+            log.debug("读取隧道输出失败: %s", exc)
+        finally:
+            output.put(None)
+
+    @staticmethod
+    def _terminate_process(proc: subprocess.Popen) -> None:
+        try:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=3)
+        except Exception as exc:
+            log.debug("回收隧道进程失败: %s", exc)
 
     def _kill_current(self) -> None:
         proc = self._proc
         if proc is not None:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            self._terminate_process(proc)
             self._proc = None
 
 

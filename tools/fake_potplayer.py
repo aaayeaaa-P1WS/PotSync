@@ -53,7 +53,8 @@ class FakePotPlayer:
     def __init__(self, media: str, duration_ms: int, paused: bool,
                  class_name: str = "PotPlayer64",
                  playlist: Optional[list] = None, wrap: bool = False,
-                 load_delay: int = 0, ignore_nav: bool = False) -> None:
+                 load_delay: int = 0, ignore_nav: bool = False,
+                 hang_ms: int = 0) -> None:
         self.media = media
         self.duration = duration_ms
         self.status = STATUS_PAUSED if paused else STATUS_RUNNING
@@ -67,6 +68,7 @@ class FakePotPlayer:
         self.wrap = wrap          # 到头/到尾是否循环（对应 PotPlayer 列表循环设置）
         self.load_delay = load_delay    # >0：切换后延迟该毫秒才真正生效（模拟真实加载耗时）
         self.ignore_nav = ignore_nav    # True：忽略上/下一集命令（模拟卡死/无响应）
+        self.hang_ms = hang_ms          # >0：每条控制/标题消息阻塞指定毫秒
         self.pending_delta = 0          # 延迟加载期间累积的切换步数
         self._load_timer = None         # threading.Timer | None
 
@@ -132,6 +134,8 @@ class FakePotPlayer:
         fake = self
 
         def wndproc(hwnd, msg, wparam, lparam):
+            if fake.hang_ms and msg in (WM_USER, WM_COMMAND, win32con.WM_GETTEXT):
+                time.sleep(fake.hang_ms / 1000)
             if msg == WM_USER:
                 if wparam == POT_GET_TOTAL_TIME:
                     return fake.duration
@@ -197,6 +201,7 @@ def main() -> None:
     wrap = "--wrap" in sys.argv
     ignore_nav = "--ignore-nav" in sys.argv
     load_delay = 0
+    hang_ms = 0
     class_name = "PotPlayer64"
     if "--class" in sys.argv:
         i = sys.argv.index("--class")
@@ -204,6 +209,9 @@ def main() -> None:
     if "--load-delay" in sys.argv:
         i = sys.argv.index("--load-delay")
         load_delay = int(sys.argv[i + 1])
+    if "--hang-ms" in sys.argv:
+        i = sys.argv.index("--hang-ms")
+        hang_ms = int(sys.argv[i + 1])
 
     if "--playlist" in sys.argv:
         i = sys.argv.index("--playlist")
@@ -215,7 +223,7 @@ def main() -> None:
         duration = int(args[1]) if len(args) > 1 else 60000
 
     FakePotPlayer(media, duration, paused, class_name, playlist, wrap,
-                  load_delay, ignore_nav).run()
+                  load_delay, ignore_nav, hang_ms).run()
 
 
 if __name__ == "__main__":

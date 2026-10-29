@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "client"))
@@ -33,7 +34,22 @@ def wait(cond, timeout=6.0, interval=0.1) -> bool:
     return False
 
 
+def test_open_file_uses_current_instance():
+    bridge = PotPlayerBridge((FAKE_CLASS,))
+    exe = r"C:\PotPlayer\PotPlayerMini64.exe"
+    media = r"D:\动漫 合集\第 02 集.mkv"
+    with patch.object(bridge, "exe_path", return_value=exe), \
+            patch("pot_bridge.subprocess.Popen") as launch:
+        assert bridge.open_file(media)
+    launch.assert_called_once_with([exe, media, "/current"])
+    command = launch.call_args.args[0]
+    assert command[-1] == "/current"
+    assert "/new" not in command
+    print("PASS  直开媒体显式使用当前 PotPlayer 实例，不使用 /new")
+
+
 def main() -> int:
+    test_open_file_uses_current_instance()
     proc = subprocess.Popen([sys.executable, str(FAKE), "--class", FAKE_CLASS,
                              "--playlist",
                              "ep01.mkv:60000,ep02.mkv:61000,ep03.mkv:62000"])
@@ -101,6 +117,30 @@ def main() -> int:
         time.sleep(0.3)
         assert "ep01.mkv" in bridge.media_name()
         print("PASS  列表边界保护")
+
+        # 无响应窗口：标题与状态读取均受 400ms 超时保护，不能卡住调用线程
+        hung = subprocess.Popen(
+            [sys.executable, str(FAKE), "--class", "FakePotHung",
+             "--playlist", "ep01.mkv:60000", "--hang-ms", "2000"])
+        try:
+            hung_bridge = PotPlayerBridge(("FakePotHung",))
+            assert wait(hung_bridge.available), "无响应假播放器未启动"
+            started = time.monotonic()
+            assert hung_bridge.media_name() == ""
+            title_elapsed = time.monotonic() - started
+            assert title_elapsed < 1.2, f"标题读取阻塞: {title_elapsed:.2f}s"
+            started = time.monotonic()
+            assert hung_bridge.snapshot() is None
+            snapshot_elapsed = time.monotonic() - started
+            assert snapshot_elapsed < 1.2, f"状态读取阻塞: {snapshot_elapsed:.2f}s"
+            print(f"PASS  无响应窗口有界返回（标题 {title_elapsed:.2f}s，"
+                  f"状态 {snapshot_elapsed:.2f}s）")
+        finally:
+            hung.terminate()
+            try:
+                hung.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                hung.kill()
 
         print("\n全部通过 ✔")
         return 0

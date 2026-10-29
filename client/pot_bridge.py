@@ -127,7 +127,7 @@ def parse_dpl(path: str) -> dict:
     playname, files = "", []
     try:
         with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-            text = f.read(2 << 20)          # 列表文件很小，防御性截断
+            text = f.read()                 # 完整读取，避免大列表尾部条目被截掉
     except OSError:
         return {"playname": "", "files": []}
     if not text.startswith("DAUMPLAYLIST"):
@@ -215,14 +215,31 @@ class PotPlayerBridge:
     def duration_ms(self) -> Optional[int]:
         return self._send(WM_USER, POT_GET_TOTAL_TIME, 0)
 
+    def _window_text(self, hwnd: int) -> Optional[str]:
+        """带超时读取窗口标题，避免无响应播放器阻塞 PotSync 界面线程。"""
+        buf = ctypes.create_unicode_buffer(1024)
+        result = ctypes.c_size_t()
+        try:
+            send = ctypes.windll.user32.SendMessageTimeoutW
+            send.argtypes = [
+                wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_void_p,
+                wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t),
+            ]
+            send.restype = ctypes.c_size_t
+            ok = send(hwnd, win32con.WM_GETTEXT, len(buf),
+                      ctypes.cast(buf, ctypes.c_void_p), SMTO_ABORTIFHUNG,
+                      MSG_TIMEOUT_MS, ctypes.byref(result))
+            return buf.value if ok else None
+        except Exception as exc:
+            log.debug("读取窗口标题失败: %s", exc)
+            return None
+
     def media_name(self) -> str:
         hwnd = self.find_window()
         if not hwnd:
             return ""
-        try:
-            return media_name_from_title(win32gui.GetWindowText(hwnd))
-        except Exception:
-            return ""
+        title = self._window_text(hwnd)
+        return media_name_from_title(title) if title is not None else ""
 
     def snapshot(self) -> Optional[Snapshot]:
         """一次采样；PotPlayer 未运行返回 None。"""
@@ -436,35 +453,58 @@ class PotPlayerBridge:
                 return pn
         return ""
 
-    def playlist_files(self) -> list:
-        """PotPlayer 播放列表中的全部视频文件完整路径（.dpl 新的优先，去重）。"""
-        seen, out = set(), []
+    def playlist_index(self) -> dict:
+        """一次读取全部 .dpl，建立“规范化文件名 → 完整路径列表”索引。
+
+        只读取文本和内存索引，不向 PotPlayer 发送任何切集命令；同名文件
+        保留多个候选，查找时只检查目标候选是否存在，不遍历试开列表。
+        """
+        index = {}
         for full in self._dpl_files():
-            for p in parse_dpl(full)["files"]:
-                if os.path.splitext(p)[1].lower() in VIDEO_EXTS \
-                        and p not in seen:
-                    seen.add(p)
-                    out.append(p)
+            for path in parse_dpl(full)["files"]:
+                if os.path.splitext(path)[1].lower() not in VIDEO_EXTS:
+                    continue
+                key = normalize_media(os.path.basename(path))
+                if key:
+                    index.setdefault(key, []).append(path)
+        return index
+
+    def playlist_files(self) -> list:
+        """完整播放列表中的视频路径（保留原读取顺序，路径去重）。"""
+        seen, out = set(), []
+        for paths in self.playlist_index().values():
+            for path in paths:
+                if path not in seen:
+                    seen.add(path)
+                    out.append(path)
         return out
 
+    def playlist_stats(self) -> tuple:
+        """供未命中提示使用：返回（列表文件数，视频条目数）。"""
+        return len(self._dpl_files()), len(self.playlist_files())
+
     def find_in_playlist(self, target_norm: str) -> str:
-        """在播放列表各项中找同名（规范化）视频文件。
-        返回完整路径；文件已不存在/找不到返回 ""。"""
-        if not target_norm:
+        """从完整列表索引中直接取目标路径；不发送上一集/下一集命令。"""
+        norm = normalize_media(target_norm)
+        if not norm:
             return ""
-        for p in self.playlist_files():
-            if normalize_media(os.path.basename(p)) == target_norm \
-                    and os.path.exists(p):
-                return p
+        for path in self.playlist_index().get(norm, []):
+            if os.path.exists(path):
+                return path
         return ""
 
     def open_file(self, path: str) -> bool:
-        """用当前 PotPlayer 直接打开指定文件（等价用户双击，单次切换零轮巡）。"""
+        """在已绑定的 PotPlayer 实例中打开文件，不新建播放器窗口。
+
+        /current 是 PotPlayer 的显式“当前实例播放”参数；无参数启动会受
+        “多实例”设置影响，可能新开窗口。保留原有 hwnd 绑定，避免切集后
+        又追踪到另一个播放器实例。
+        """
         exe = self.exe_path()
         if not exe or not path:
             return False
         try:
-            subprocess.Popen([exe, path])
+            subprocess.Popen([exe, path, "/current"])
             return True
         except Exception as exc:
             log.warning("启动 PotPlayer 打开文件失败: %s", exc)
@@ -481,7 +521,8 @@ class PotPlayerBridge:
         def _cb(hwnd, _):
             try:
                 if win32gui.GetClassName(hwnd) in classes:
-                    title = media_name_from_title(win32gui.GetWindowText(hwnd))
+                    raw_title = self._window_text(hwnd)
+                    title = media_name_from_title(raw_title or "")
                     if normalize_media(title) == norm:
                         found.append(hwnd)
             except Exception:

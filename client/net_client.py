@@ -18,6 +18,7 @@ import json
 import logging
 import threading
 import time
+import urllib.request
 from typing import Optional
 
 import websockets
@@ -47,6 +48,22 @@ def build_uri(host: str, port: int) -> str:
     """443 端口视为 HTTPS/WSS 隧道入口（如 *.trycloudflare.com），其余用明文 ws。"""
     scheme = "wss" if int(port) == 443 else "ws"
     return f"{scheme}://{host}:{port}"
+
+
+def preferred_http_proxy(uri: str) -> str:
+    """优先选 websockets 支持的 HTTP(S) 代理，不让 SOCKS 项抢先导致误走直连。"""
+    proxies = urllib.request.getproxies()
+    scheme = "https" if uri.startswith("wss://") else "http"
+    candidates = (scheme, "http" if scheme == "https" else "https", "all")
+    for key in candidates:
+        proxy = (proxies.get(key) or "").strip()
+        if not proxy:
+            continue
+        if "://" not in proxy:
+            proxy = "http://" + proxy
+        if proxy.lower().startswith(("http://", "https://")):
+            return proxy
+    return ""
 
 
 class NetClient(QObject):
@@ -102,18 +119,25 @@ class NetClient(QObject):
 
     async def _main(self, host: str, port: int) -> None:
         self._loop = asyncio.get_running_loop()
+        self._connected_once = False
         uri = build_uri(host, port)
         try:
             if _is_private_host(host):
                 await self._session(uri, proxy=None)
             else:
-                try:
-                    await self._session(uri)
-                except InvalidProxy as exc:
-                    # 系统代理为 websockets 不支持的形式（如 Windows 的
-                    # socks:// 注册表代理）时降级为直连，保证可用性
-                    log.warning("系统代理不可用（%s），改为直连", exc)
-                    self.sigNotice.emit("系统代理不受支持，已切换为直连")
+                proxy = preferred_http_proxy(uri)
+                if proxy:
+                    try:
+                        await self._session(uri, proxy=proxy)
+                    except (OSError, websockets.WebSocketException, InvalidProxy) as exc:
+                        if self._connected_once:
+                            raise       # 已连接后的掉线不应被当成首次连接失败重试
+                        log.warning("HTTP 代理连接失败（%s），尝试直连", exc)
+                        self.sigNotice.emit("HTTP 代理连接失败，正在尝试直连")
+                        await self._session(uri, proxy=None)
+                else:
+                    if urllib.request.getproxies().get("socks"):
+                        self.sigNotice.emit("SOCKS 代理暂不支持，使用直连")
                     await self._session(uri, proxy=None)
         except (OSError, websockets.WebSocketException) as exc:
             self.sigError.emit(f"无法连接服务器 {uri}：{exc}")
@@ -122,12 +146,11 @@ class NetClient(QObject):
             self._loop = None
             self.sigDisconnected.emit("连接已断开")
 
-    async def _session(self, uri: str, proxy=True) -> None:
-        kwargs = dict(max_size=64 * 1024, ping_interval=None)
-        if proxy is None:
-            kwargs["proxy"] = None
+    async def _session(self, uri: str, proxy: Optional[str] = None) -> None:
+        kwargs = dict(max_size=64 * 1024, ping_interval=None, proxy=proxy)
         async with websockets.connect(uri, **kwargs) as ws:
             self._ws = ws
+            self._connected_once = True
             self.sigConnected.emit()
             self._ping_task = asyncio.create_task(self._ping_loop(ws))
             try:
@@ -161,11 +184,13 @@ class NetClient(QObject):
 
     def _call(self, coro) -> None:
         loop = self._loop
-        if loop is not None and self._ws is not None:
-            try:
-                asyncio.run_coroutine_threadsafe(coro, loop)
-            except RuntimeError:
-                pass
+        if loop is None or self._ws is None:
+            coro.close()            # 连接已结束时主动关闭协程，避免退出告警
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:
+            coro.close()
 
     async def _send(self, obj: dict) -> None:
         ws = self._ws

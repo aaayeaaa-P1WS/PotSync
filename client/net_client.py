@@ -199,6 +199,7 @@ class NetClient(QObject):
                 self.sigConnecting.emit(1, 0)
 
             reason = "连接已断开"
+            sessions_before = self._session_count
             try:
                 await self._session(uri, proxy)
             except asyncio.CancelledError:
@@ -220,6 +221,9 @@ class NetClient(QObject):
 
             if not self._running:
                 break
+            # 上一次连接确实建立过：退避从 0.5s 重新开始（否则长会话掉一次就要等 30s）
+            if self._session_count > sessions_before:
+                attempt = 1
             if self._local_close:
                 self._local_close = False
                 if self._switching:

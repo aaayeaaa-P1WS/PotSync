@@ -34,6 +34,8 @@ app = QCoreApplication(sys.argv)
 SERVER = ROOT / "server" / "server.py"
 PORT = 18772
 PROXY_PORT = 18773
+PORT2 = 18774
+PROXY2_PORT = 18775
 
 
 class ChaosProxy:
@@ -195,28 +197,82 @@ def run_test() -> None:
 
 
 proxy = None
+proxy2 = None
+
+
+def run_token_expiry_test() -> None:
+    """掉线超过宽限期（房间里还有别人）：旧身份被清理，客户端应自动重新加入同一房间。"""
+    events = []
+    net = NetClient()      # 建房者，走可掐断的代理
+    watcher = NetClient()  # 旁观者，保持在线，让房间不会因为没人而解散
+    state = {"room": "", "token": "", "joined": 0, "lost": 0, "resume_failed": "",
+             "notice": []}
+    net.sigRoomCreated.connect(
+        lambda room, room_state, members: (state.__setitem__("room", room),
+                                           state.__setitem__("token", net.token)))
+    net.sigRoomJoined.connect(
+        lambda room, room_state, members: (state.__setitem__("joined", state["joined"] + 1),
+                                           state.__setitem__("room", room),
+                                           state.__setitem__("token", net.token)))
+    net.sigConnectionLost.connect(lambda reason: state.__setitem__("lost", state["lost"] + 1))
+    net.sigResumeFailed.connect(lambda reason: state.__setitem__("resume_failed", reason))
+    net.sigNotice.connect(lambda text: state["notice"].append(text))
+    net.sigError.connect(lambda msg: events.append(f"error:{msg}"))
+    watcher.sigError.connect(lambda msg: events.append(f"watcher-error:{msg}"))
+
+    watcher.connect_to("127.0.0.1", PORT2, "旁观者")
+    assert wait_for(lambda: watcher.connected, 8, "旁观者连接"), events
+    net.connect_to("127.0.0.1", PROXY2_PORT, "身份过期测试")
+    assert wait_for(lambda: net.connected, 8, "首次连接"), events
+    net.create_room("身份过期测试")
+    assert wait_for(lambda: bool(state["room"]), 8, "建房"), events
+    room, token = state["room"], state["token"]
+    watcher.join_room(room, "旁观者")
+    assert wait_for(lambda: watcher.room == room, 8, "旁观者入房"), events
+    print(f"PASS  [过期] 建房 {room}，旁观者在线")
+
+    proxy2.cut()   # 宽限期 0.2s、客户端 0.5s 后才重连 → 旧身份必然已被清理
+    assert wait_for(lambda: state["lost"] >= 1, 6, "掉线信号"), events
+    assert wait_for(lambda: state["joined"] >= 1, 20, "重新加入"), events
+    assert state["room"] == room, f"重新加入后房间应相同: {state['room']} != {room}"
+    assert not state["resume_failed"], f"不应把用户踢回主页: {state['resume_failed']}"
+    assert state["token"] and state["token"] != token, "应拿到新的成员身份"
+    assert net.connected
+    net.shutdown()
+    watcher.shutdown()
+    print("PASS  [过期] 身份失效后自动重新加入房间（新身份），未掉回主页")
 
 
 def main() -> int:
-    global proxy
+    global proxy, proxy2
     proc = subprocess.Popen(
         [sys.executable, str(SERVER), "--host", "127.0.0.1", "--port", str(PORT),
          "--log-level", "WARNING"])
+    proc2 = subprocess.Popen(
+        [sys.executable, str(SERVER), "--host", "127.0.0.1", "--port", str(PORT2),
+         "--offline-grace", "0.2", "--janitor-interval", "0.1", "--room-ttl", "60",
+         "--log-level", "WARNING"])
     try:
         assert wait_port(PORT), "relay 服务器启动失败"
+        assert wait_port(PORT2), "relay 服务器（身份过期测试）启动失败"
         proxy = ChaosProxy(PROXY_PORT, PORT)
+        proxy2 = ChaosProxy(PROXY2_PORT, PORT2)
         assert wait_port(PROXY_PORT), "代理启动失败"
+        assert wait_port(PROXY2_PORT), "代理 2 启动失败"
         run_test()
+        run_token_expiry_test()
         print("\n全部通过 ✔")
         return 0
     finally:
-        if proxy is not None:
-            proxy.close()
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        for p in (proxy, proxy2):
+            if p is not None:
+                p.close()
+        for p in (proc, proc2):
+            p.terminate()
+            try:
+                p.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                p.kill()
 
 
 if __name__ == "__main__":

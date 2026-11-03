@@ -398,11 +398,20 @@ class NetClient(QObject):
         elif mtype == "error":
             code = str(msg.get("code", ""))
             text = str(msg.get("message", "未知错误"))
-            if code in (ERR_NO_ROOM, ERR_BAD_TOKEN):
+            if code == ERR_BAD_TOKEN and self._room:
+                # 服务器还在，只是掉线超过宽限期、旧身份被清理：直接重新加入同一房间
+                log.info("恢复身份失败，改为重新加入房间 %s", self._room)
+                room = self._room
+                self._token = ""
+                self.sigNotice.emit("重连后身份已过期，正在重新加入房间…")
+                asyncio.ensure_future(self._send(
+                    {"type": MSG_JOIN, "room": room, "nickname": self._nickname}))
+                return
+            if code == ERR_NO_ROOM:
                 had_room = bool(self._room)
                 self._room = ""
                 self._token = ""
-                if had_room or code == ERR_BAD_TOKEN:
+                if had_room:
                     self.sigResumeFailed.emit(text)
                     return
             self.sigError.emit(text)

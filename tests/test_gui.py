@@ -29,6 +29,7 @@ app = QApplication(sys.argv)
 
 from main_window import MainWindow, detect_lan_ip, fmt_time, parse_invite  # noqa: E402
 from version import APP_VERSION  # noqa: E402
+import theme  # noqa: E402
 import updater  # noqa: E402
 
 # 测试中禁用静默检查更新：避免真实网络请求与弹窗阻塞离屏测试
@@ -67,6 +68,24 @@ def main() -> int:
     assert APP_VERSION in w.windowTitle(), w.windowTitle()
     assert w.btnUpdate.text() == "检查更新" and w.btnUpdate.isEnabled()
     print(f"PASS  标题栏与主页版本号展示 -> v{APP_VERSION}")
+
+    # 侧边栏导航（未入房时房间页禁用）与主题切换
+    assert w.sidebar.current() == 0
+    assert not w.sidebar._buttons[1][0].isEnabled()
+    w.sidebar._buttons[2][0].click()
+    app.processEvents()
+    assert w.stack.currentIndex() == 2
+    w.sidebar._buttons[0][0].click()
+    app.processEvents()
+    assert w.stack.currentIndex() == 0
+    print("PASS  侧边栏导航（设置页往返，未入房时房间页禁用）")
+
+    for mode, word in (("light", "浅色"), ("dark", "深色")):
+        w._on_theme_changed(theme.build_palette(mode))
+        app.processEvents()
+        assert word in w.lblThemeMode.text(), w.lblThemeMode.text()
+    assert not w.windowIcon().isNull()
+    print("PASS  深浅色主题切换与窗口图标")
 
     # 一键复制邀请链接
     w.room_code = "AB12CD"

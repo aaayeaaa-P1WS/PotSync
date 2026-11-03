@@ -2,5 +2,7 @@
 
 from .home_page import build_home
 from .room_page import build_room
+from .settings_page import build_settings
+from .sidebar import Sidebar
 
-__all__ = ["build_home", "build_room"]
+__all__ = ["build_home", "build_room", "build_settings", "Sidebar"]

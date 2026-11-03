@@ -18,20 +18,25 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QGuiApplication
+from PyQt5.QtCore import QUrl, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon
 from PyQt5.QtWidgets import (
-    QApplication, QLabel, QListWidgetItem, QMainWindow, QMessageBox,
-    QStackedWidget, QStatusBar, QWidget,
+    QApplication, QHBoxLayout, QLabel, QListWidgetItem, QMainWindow,
+    QMessageBox, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
 )
 
+import diagnostics
+import theme
 from net_client import NetClient
 from pot_bridge import STATUS_RUNNING, STATUS_TEXT, PotPlayerBridge, Snapshot
 from relay import EmbeddedServer
 from sync_engine import SyncEngine
 from tunnel import PublicEndpoint, TunnelManager
 from ui.home_page import build_home
+from ui.icons import logo
 from ui.room_page import build_room
+from ui.settings_page import build_settings
+from ui.sidebar import Sidebar
 from version import APP_NAME, APP_VERSION
 import firewall
 import updater
@@ -122,7 +127,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} 一起看 v{APP_VERSION} · PotPlayer 同步播放")
-        self.resize(560, 640)
+        self.resize(1080, 720)
+        self.setMinimumSize(920, 600)
 
         self.cfg = load_config()
         self.bridge = PotPlayerBridge()
@@ -140,9 +146,16 @@ class MainWindow(QMainWindow):
         self._last_media_shown = None
         self._closing = False
         self._resuming = False
+        self._members: list = []
 
         self._build_ui()
         self._wire()
+
+        app = QApplication.instance()
+        watcher = getattr(app, "_potsync_theme_watcher", None) if app else None
+        if watcher is not None:
+            watcher.changed.connect(self._on_theme_changed)
+        self._on_theme_changed(theme.current())
 
         self.editNickname.setText(self.cfg.get("nickname", ""))
         self.editServer.setText(self.cfg.get("server", DEFAULT_SERVER))
@@ -281,24 +294,116 @@ class MainWindow(QMainWindow):
     # ================= UI 构建 =================
 
     def _build_ui(self) -> None:
-        self.stack = QStackedWidget(self)
-        self.setCentralWidget(self.stack)
-        self.stack.addWidget(self._build_home())
-        self.stack.addWidget(self._build_room())
+        root = QWidget(self)
+        root.setObjectName("root")
+        layout = QHBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.sidebar = Sidebar(root)
+        self.sidebar.navigate.connect(self._navigate)
+        layout.addWidget(self.sidebar)
+
+        content = QWidget(root)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        self.stack = QStackedWidget(content)
+        self.stack.addWidget(self._build_home())        # 0 主页
+        self.stack.addWidget(self._build_room())        # 1 房间
+        self.stack.addWidget(self._build_settings())    # 2 设置
+        self.stack.currentChanged.connect(lambda _i: self._update_nav())
+        content_layout.addWidget(self.stack, 1)
+        layout.addWidget(content, 1)
+        self.setCentralWidget(root)
 
         self.status = QStatusBar(self)
         self.setStatusBar(self.status)
         self.lblConn = QLabel("● 未连接")
         self.lblConn.setObjectName("connLabel")
+        self.lblConn.setProperty("state", "idle")
         self.lblRtt = QLabel("")
         self.status.addPermanentWidget(self.lblRtt)
         self.status.addPermanentWidget(self.lblConn)
+        self._update_nav()
 
     def _build_home(self) -> QWidget:
         return build_home(self)
 
     def _build_room(self) -> QWidget:
         return build_room(self)
+
+    def _build_settings(self) -> QWidget:
+        return build_settings(self)
+
+    # ================= 导航 / 主题 / 连接状态 =================
+
+    def _navigate(self, index: int) -> None:
+        if index == 1 and not self.room_code:
+            self.sidebar.set_current(self.stack.currentIndex())
+            return
+        self.stack.setCurrentIndex(index)
+
+    def _update_nav(self) -> None:
+        self.sidebar.set_page_enabled(1, bool(self.room_code))
+        self.sidebar.set_current(self.stack.currentIndex())
+
+    def _go_home(self) -> None:
+        if self.stack.currentIndex() != 0:
+            self.stack.setCurrentIndex(0)
+        self._update_nav()
+
+    def _go_room(self) -> None:
+        if self.stack.currentIndex() != 1:
+            self.stack.setCurrentIndex(1)
+        self._update_nav()
+
+    def _set_conn(self, state: str, text: str) -> None:
+        """状态栏连接指示：用动态属性驱动配色，避免到处写死样式表。"""
+        self.lblConn.setText(text)
+        if self.lblConn.property("state") != state:
+            self.lblConn.setProperty("state", state)
+            style = self.lblConn.style()
+            style.unpolish(self.lblConn)
+            style.polish(self.lblConn)
+
+    def _set_badge(self, text: str, kind: str = "muted") -> None:
+        badge = getattr(self, "lblBadge", None)
+        if badge is None:
+            return
+        badge.setText(text)
+        if badge.property("kind") != kind:
+            badge.setProperty("kind", kind)
+            style = badge.style()
+            style.unpolish(badge)
+            style.polish(badge)
+
+    def _on_theme_changed(self, pal) -> None:
+        if pal is None:
+            pal = theme.current()
+        self.sidebar.refresh(pal, pal.mode, pal.accent)
+        self._apply_window_icon(pal)
+        label = getattr(self, "lblThemeMode", None)
+        if label is not None:
+            label.setText(f"当前：跟随系统 · {'深色' if pal.mode == 'dark' else '浅色'}")
+        if getattr(self, "_members", None):
+            self._on_members(self._members)
+        self.update()
+
+    def _apply_window_icon(self, pal=None) -> None:
+        pal = pal or theme.current()
+        try:
+            self.setWindowIcon(QIcon(logo(96, pal.accent)))
+        except Exception:  # 图标失败不影响主流程
+            log.debug("设置窗口图标失败", exc_info=True)
+
+    def _open_log_dir(self) -> None:
+        try:
+            folder = diagnostics.log_path().parent
+            folder.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        except Exception as exc:
+            self._log(f"打开日志目录失败：{exc}")
 
     # ================= 信号接线 =================
 
@@ -328,9 +433,24 @@ class MainWindow(QMainWindow):
 
         e = self.engine
         e.sigLocalState.connect(self._on_local_state)
-        e.sigSyncInfo.connect(self.lblSync.setText)
+        e.sigSyncInfo.connect(self._on_sync_info)
         e.sigLog.connect(self._log)
         e.sigBroadcastState.connect(self._broadcast_state)
+
+    def _on_sync_info(self, text: str) -> None:
+        self.lblSync.setText(text or "")
+        state = "ok"
+        if text.startswith("⏳"):
+            state = "wait"
+        elif text.startswith("⚠") or text.startswith("偏差"):
+            state = "warn"
+        elif not text:
+            state = "ok"
+        if self.lblSync.property("state") != state:
+            self.lblSync.setProperty("state", state)
+            style = self.lblSync.style()
+            style.unpolish(self.lblSync)
+            style.polish(self.lblSync)
 
     # ================= 配置 / 昵称 =================
 
@@ -505,7 +625,8 @@ class MainWindow(QMainWindow):
         self.net.leave_room()
         self.engine.leave_room()
         self.room_code = ""
-        self.stack.setCurrentIndex(0)
+        self._go_home()
+        self._set_badge("未连接", "bad")
         self._log("已离开房间")
 
     # ================= 邀请链接 =================
@@ -523,16 +644,15 @@ class MainWindow(QMainWindow):
 
     def _on_connecting(self, attempt: int, delay_ms: int) -> None:
         if attempt <= 1:
-            self.lblConn.setText("● 连接中…")
+            self._set_conn("warn", "● 连接中…")
         else:
-            self.lblConn.setText(f"● 重连中（第 {attempt} 次）")
-        self.lblConn.setStyleSheet("color:#e3b341;")
+            self._set_conn("warn", f"● 重连中（第 {attempt} 次）")
         if self.stack.currentIndex() == 1 and attempt in (2, 4, 6, 8):
             self._log(f"正在重连（第 {attempt} 次，{delay_ms / 1000:.1f}s 后重试）…")
 
     def _on_connected(self) -> None:
-        self.lblConn.setText("● 已连接")
-        self.lblConn.setStyleSheet("color:#3dd68c;")
+        self._set_conn("ok", "● 已连接")
+        self._set_badge("已连接", "ok")
         if self.stack.currentIndex() == 1 and self.room_code:
             self._resuming = True
             self.status.showMessage("已重新连上服务器，正在恢复房间…", 4000)
@@ -545,8 +665,8 @@ class MainWindow(QMainWindow):
 
     def _on_connection_lost(self, reason: str) -> None:
         """意外掉线：房间与成员身份都保留，只显示重连状态，绝不主动退房。"""
-        self.lblConn.setText("● 重连中…")
-        self.lblConn.setStyleSheet("color:#e3b341;")
+        self._set_conn("warn", "● 重连中…")
+        self._set_badge("重连中", "warn")
         self.lblRtt.setText("")
         if self.stack.currentIndex() == 1:
             self._log(f"⚠ 连接中断（{reason}），正在自动重连；房间与播放器状态都保留")
@@ -558,13 +678,13 @@ class MainWindow(QMainWindow):
         """连接线程彻底结束（主动关闭或已无法恢复）时的兜底。"""
         if self._closing:
             return
-        self.lblConn.setText("● 未连接")
-        self.lblConn.setStyleSheet("color:#e5534b;")
+        self._set_conn("bad", "● 未连接")
+        self._set_badge("未连接", "bad")
         self.lblRtt.setText("")
         if self.stack.currentIndex() == 1:
             self.engine.leave_room()
             self.room_code = ""
-            self.stack.setCurrentIndex(0)
+            self._go_home()
             self.status.showMessage("与服务器断开，已退出房间", 4000)
 
     def _on_room_resumed(self, room: str, state: Optional[dict], members: list) -> None:
@@ -576,6 +696,7 @@ class MainWindow(QMainWindow):
             return
         self._on_members(members)
         self.engine.enter_room(state)   # 重新对齐进度与播放/暂停
+        self._set_badge("已恢复", "ok")
         self._log("✓ 已恢复房间，正在按服务器时间对齐进度…")
         self.status.showMessage("已恢复房间", 3000)
 
@@ -586,7 +707,7 @@ class MainWindow(QMainWindow):
         if self.stack.currentIndex() == 1:
             self.engine.leave_room()
             self.room_code = ""
-            self.stack.setCurrentIndex(0)
+            self._go_home()
             self.status.showMessage(f"房间已不存在（{message}），请重新创建或加入", 6000)
 
     def _on_error(self, message: str) -> None:
@@ -608,7 +729,8 @@ class MainWindow(QMainWindow):
         self.lblRoomCode.setText(room)
         self._on_members(members)
         self.txtLog.clear()
-        self.stack.setCurrentIndex(1)
+        self._go_room()
+        self._set_badge("已连接", "ok")
         self.engine.enter_room(state)
         if state:
             self._log(f"同步房间状态：{'暂停' if state.get('paused') else '播放中'} "
@@ -618,13 +740,15 @@ class MainWindow(QMainWindow):
         self.engine.apply_remote_state(s)
 
     def _on_members(self, members: list) -> None:
+        self._members = list(members or [])
         self.listMembers.clear()
-        for m in members:
+        muted = theme.current().text_muted if theme.current() else "#8b949e"
+        for m in self._members:
             name = m.get("name", "匿名")
             online = bool(m.get("online", True))
-            item = QListWidgetItem(f"👤 {name}" if online else f"👤 {name}（离线，等待重连）")
+            item = QListWidgetItem(name if online else f"{name}（离线，等待重连）")
             if not online:
-                item.setForeground(QColor("#8b949e"))
+                item.setForeground(QColor(muted))
             self.listMembers.addItem(item)
 
     def _broadcast_state(self, state: dict) -> None:
@@ -638,7 +762,7 @@ class MainWindow(QMainWindow):
     def _on_local_state(self, snap: Optional[Snapshot]) -> None:
         if snap is None:
             if self.stack.currentIndex() == 1:
-                self.lblStatus.setText("状态：等待 PotPlayer 打开（房间保留）")
+                self.lblStatus.setText("状态：PotPlayer 未运行")
             else:
                 self.lblStatus.setText("状态：未检测到 PotPlayer")
             return
@@ -677,6 +801,10 @@ class MainWindow(QMainWindow):
             return
         from datetime import datetime
         self.txtLog.appendPlainText(f"[{datetime.now():%H:%M:%S}] {text}")
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        theme.apply_titlebar(self, theme.current().mode == "dark")
 
     def closeEvent(self, event) -> None:
         self._closing = True

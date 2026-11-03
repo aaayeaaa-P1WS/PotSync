@@ -41,9 +41,9 @@ def main() -> int:
     diagnostics.install_qt_message_handler()
     logging.getLogger("potsync.app").info("启动 PotSync，日志：%s", log_path)
 
-    qss = Path(__file__).resolve().parent / "resources" / "style.qss"
-    if qss.exists():
-        app.setStyleSheet(qss.read_text(encoding="utf-8"))
+    # 跟随 Windows 深色/浅色与强调色（1.5s 热切换，无需重启）
+    import theme
+    theme.install(app)
 
     from main_window import MainWindow
     window = MainWindow()

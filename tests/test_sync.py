@@ -28,6 +28,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "server" / "server.py"
 PORT = 18765
 URI = f"ws://127.0.0.1:{PORT}"
+# 第二个服务器：极短的宽限期/房间保留期，用来验证过期回收（默认值 120s/900s 测试等不起）
+TTL_PORT = 18766
+TTL_URI = f"ws://127.0.0.1:{TTL_PORT}"
 
 
 def wait_port(port: int, timeout: float = 8.0) -> bool:
@@ -74,7 +77,9 @@ async def run_tests() -> None:
     await send(c1, type="create", nickname="小明")
     m = await recv_type(c1, "created")
     room = m["room"]
+    token1 = m["you"]
     assert len(room) == 6 and m["state"] is None and len(m["members"]) == 1
+    assert m.get("protocol") == 2 and token1, "协议 2.0 应下发 protocol 与成员 id"
     print(f"PASS  创建房间 {room}")
 
     # --- 加入 ---
@@ -106,7 +111,21 @@ async def run_tests() -> None:
     m = await recv_type(c3, "joined")
     assert m["state"]["position"] == 12345 and m["state"]["paused"] is True
     print("PASS  新成员获得房间当前状态")
+
+    # --- 连接断开：保留成员位，等待自动重连（2.0 语义） ---
     await c3.close()
+    notice = await recv_until(
+        c1,
+        lambda m: m.get("type") == "notice" and "连接中断" in (m.get("text") or ""),
+        "等待掉线通知超时")
+    assert "路人" in notice["text"], notice
+    await recv_until(
+        c1,
+        lambda m: m.get("type") == "members"
+        and any(x["name"] == "路人" and x.get("online") is False
+                for x in m["members"]),
+        "等待离线成员列表超时")
+    print("PASS  掉线成员保留为离线（等待自动重连）")
 
     # --- 改名 ---
     await send(c2, type="rename", nickname="红红")
@@ -132,43 +151,83 @@ async def run_tests() -> None:
     await c4.close()
     print("PASS  加入不存在房间返回错误")
 
-    # --- 主动离房 ---
+    # --- 主动离房：立即移除；掉线的路人仍保留 ---
     await send(c2, type="leave")
     await recv_type(c2, "left")
-    members = await recv_until(
+    await recv_until(
         c1,
-        lambda m: m.get("type") == "members" and len(m["members"]) == 1
-        and m["members"][0]["name"] == "小明",
-        "等待离房后的成员列表超时")
-    print("PASS  离房通知")
+        lambda m: m.get("type") == "members"
+        and [x["name"] for x in m["members"] if x.get("online")] == ["小明"],
+        "等待离房后的在线成员列表超时")
+    print("PASS  离房通知（在线成员只剩创建者）")
 
-    # --- 断线自动离房，房间变空即解散 ---
-    await c1.close()
-    await asyncio.sleep(0.5)
-    c5 = await websockets.connect(URI)
-    await send(c5, type="join", room=room, nickname="y")
-    err = await recv_type(c5, "error")
-    assert err["code"] == "NO_ROOM", "空房间应被解散"
-    await c5.close()
-    print("PASS  空房间自动解散")
+    # --- 断线重连：resume 恢复身份与房间状态 ---
+    await c1.close()                      # 模拟网络掉线（不是主动 leave）
+    await asyncio.sleep(0.4)
+    c6 = await websockets.connect(URI)
+    await send(c6, type="resume", room=room, token=token1)
+    m = await recv_type(c6, "joined")
+    assert m.get("resumed") is True and m["you"] == token1, m
+    assert m["state"]["position"] == 12345, "重连后房间状态应保留"
+    assert "小明" in {x["name"] for x in m["members"] if x.get("online")}
+    print("PASS  断线重连恢复成员身份与房间状态")
+
+    # --- 错误 token ---
+    c7 = await websockets.connect(URI)
+    await send(c7, type="resume", room=room, token="deadbeefdeadbeef")
+    err = await recv_type(c7, "error")
+    assert err["code"] == "BAD_TOKEN" and err.get("fatal") is False, err
+    await c7.close()
+    print("PASS  无效 token 返回 BAD_TOKEN")
+
+    # --- 房间过期：宽限期过后掉线成员被清、空房解散 ---
+    await ttl_expiry_test()
+    print("PASS  掉线超时后房间解散（NO_ROOM）")
+
+    await send(c6, type="leave")
+    await recv_type(c6, "left")
 
     print("\n全部通过 ✔")
 
 
+async def ttl_expiry_test() -> None:
+    """在 TTL 服务器上建房 → 掉线 → 等过期 → 再 join 应 NO_ROOM。"""
+    c = await websockets.connect(TTL_URI)
+    await send(c, type="create", nickname="甲")
+    m = await recv_type(c, "created")
+    code = m["room"]
+    await c.close()
+    # 服务器参数：--offline-grace 1 --room-ttl 1 --janitor-interval 0.2
+    await asyncio.sleep(2.0)
+    c2 = await websockets.connect(TTL_URI)
+    await send(c2, type="join", room=code, nickname="乙")
+    err = await recv_type(c2, "error")
+    assert err["code"] == "NO_ROOM", f"过期房间应解散，实际 {err}"
+    await c2.close()
+
+
+def _spawn(port: int, *extra: str) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, str(SERVER), "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "WARNING", *extra])
+
+
 def main() -> int:
-    proc = subprocess.Popen(
-        [sys.executable, str(SERVER), "--host", "127.0.0.1", "--port", str(PORT),
-         "--log-level", "WARNING"])
+    proc = _spawn(PORT)
+    ttl_proc = _spawn(TTL_PORT, "--room-ttl", "1", "--offline-grace", "1",
+                      "--janitor-interval", "0.2")
     try:
         assert wait_port(PORT), "服务器启动失败"
+        assert wait_port(TTL_PORT), "TTL 测试服务器启动失败"
         asyncio.run(run_tests())
         return 0
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        for p in (proc, ttl_proc):
+            p.terminate()
+            try:
+                p.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                p.kill()
 
 
 if __name__ == "__main__":

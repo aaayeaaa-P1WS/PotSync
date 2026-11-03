@@ -19,11 +19,10 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QGuiApplication
+from PyQt5.QtGui import QColor, QGuiApplication
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QSlider, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
+    QApplication, QLabel, QListWidgetItem, QMainWindow, QMessageBox,
+    QStackedWidget, QStatusBar, QWidget,
 )
 
 from net_client import NetClient
@@ -31,6 +30,8 @@ from pot_bridge import STATUS_RUNNING, STATUS_TEXT, PotPlayerBridge, Snapshot
 from relay import EmbeddedServer
 from sync_engine import SyncEngine
 from tunnel import PublicEndpoint, TunnelManager
+from ui.home_page import build_home
+from ui.room_page import build_room
 from version import APP_NAME, APP_VERSION
 import firewall
 import updater
@@ -137,6 +138,8 @@ class MainWindow(QMainWindow):
         self._pending: Optional[tuple] = None   # ("create",) / ("join", code)
         self._seeking = False
         self._last_media_shown = None
+        self._closing = False
+        self._resuming = False
 
         self._build_ui()
         self._wire()
@@ -292,189 +295,10 @@ class MainWindow(QMainWindow):
         self.status.addPermanentWidget(self.lblConn)
 
     def _build_home(self) -> QWidget:
-        page = QWidget()
-        v = QVBoxLayout(page)
-        v.setContentsMargins(36, 30, 36, 24)
-        v.setSpacing(14)
-
-        title = QLabel("PotSync 一起看")
-        title.setObjectName("title")
-        subtitle = QLabel("在多台电脑之间同步 PotPlayer 的播放、暂停与进度")
-        subtitle.setObjectName("subtitle")
-        v.addWidget(title)
-        v.addWidget(subtitle)
-        v.addSpacing(10)
-
-        # 昵称
-        row = QHBoxLayout()
-        row.addWidget(QLabel("昵　称"))
-        self.editNickname = QLineEdit()
-        self.editNickname.setPlaceholderText("给自己起个名字（房间成员可见）")
-        self.editNickname.setMaxLength(24)
-        self.btnSaveNick = QPushButton("保存")
-        self.btnSaveNick.setObjectName("smallBtn")
-        self.btnSaveNick.clicked.connect(self._save_nickname)
-        row.addWidget(self.editNickname, 1)
-        row.addWidget(self.btnSaveNick)
-        v.addLayout(row)
-
-        # 服务器
-        row = QHBoxLayout()
-        row.addWidget(QLabel("服务器"))
-        self.editServer = QLineEdit()
-        self.editServer.setPlaceholderText("中继服务器地址，如 1.2.3.4:8765")
-        row.addWidget(self.editServer, 1)
-        v.addLayout(row)
-
-        # 主机模式：本机内嵌服务器
-        self.chkHost = QCheckBox("在本机启动服务器（我当主机，好友直连我的电脑）")
-        self.chkHost.setToolTip("无需单独部署服务器：建房时自动在本机启动内置中继。\n"
-                                "勾选下方内网穿透即可让异地好友加入。")
-        self.chkHost.toggled.connect(self._toggle_host_mode)
-        v.addWidget(self.chkHost)
-
-        # 内网穿透
-        row = QHBoxLayout()
-        row.addSpacing(22)
-        self.chkTunnel = QCheckBox("内网穿透（自动生成公网地址，异地好友可直接加入）")
-        self.chkTunnel.setToolTip("通过 Cloudflare 免费隧道把本机服务器暴露到公网，\n"
-                                  "首次使用自动下载组件（约 30MB），无需注册。")
-        row.addWidget(self.chkTunnel, 1)
-        v.addLayout(row)
-
-        v.addSpacing(8)
-        self.btnCreate = QPushButton("创 建 房 间")
-        self.btnCreate.setObjectName("primaryBtn")
-        self.btnCreate.clicked.connect(self._create_room)
-        v.addWidget(self.btnCreate)
-
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setObjectName("divider")
-        v.addWidget(line)
-
-        v.addWidget(QLabel("加入好友的房间："))
-        self.editJoin = QLineEdit()
-        self.editJoin.setPlaceholderText("输入房间号 或 邀请链接 potsync://…")
-        v.addWidget(self.editJoin)
-
-        row = QHBoxLayout()
-        self.btnJoin = QPushButton("加 入 房 间")
-        self.btnJoin.setObjectName("primaryBtn")
-        self.btnJoin.clicked.connect(self._join_from_input)
-        self.btnJoinClip = QPushButton("📋 从剪贴板读取链接并加入")
-        self.btnJoinClip.clicked.connect(self._join_from_clipboard)
-        row.addWidget(self.btnJoin, 1)
-        row.addWidget(self.btnJoinClip, 1)
-        v.addLayout(row)
-
-        tip = QLabel("提示：创建房间后把邀请链接发给好友，对方复制链接后点\n"
-                     "「从剪贴板读取链接并加入」即可。双方需打开同一个视频文件。")
-        tip.setObjectName("tip")
-        tip.setWordWrap(True)
-        v.addSpacing(6)
-        v.addWidget(tip)
-        v.addStretch(1)
-
-        # 版本 + 检查更新
-        row = QHBoxLayout()
-        lblVer = QLabel(f"v{APP_VERSION}")
-        lblVer.setObjectName("tip")
-        row.addWidget(lblVer)
-        row.addStretch(1)
-        self.btnUpdate = QPushButton("检查更新")
-        self.btnUpdate.setObjectName("smallBtn")
-        self.btnUpdate.setFlat(True)
-        self.btnUpdate.clicked.connect(lambda: self._check_update(silent=False))
-        row.addWidget(self.btnUpdate)
-        v.addLayout(row)
-        return page
+        return build_home(self)
 
     def _build_room(self) -> QWidget:
-        page = QWidget()
-        v = QVBoxLayout(page)
-        v.setContentsMargins(28, 22, 28, 18)
-        v.setSpacing(10)
-
-        # 房间号 + 复制链接
-        row = QHBoxLayout()
-        col = QVBoxLayout()
-        lab = QLabel("房间号")
-        lab.setObjectName("subtitle")
-        self.lblRoomCode = QLabel("——————")
-        self.lblRoomCode.setObjectName("roomCode")
-        self.lblRoomCode.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        col.addWidget(lab)
-        col.addWidget(self.lblRoomCode)
-        row.addLayout(col, 1)
-        self.btnCopyLink = QPushButton("🔗 复制邀请链接")
-        self.btnCopyLink.clicked.connect(self._copy_invite_link)
-        row.addWidget(self.btnCopyLink, 0, Qt.AlignBottom)
-        v.addLayout(row)
-
-        # 成员 + 媒体信息
-        row = QHBoxLayout()
-        self.listMembers = QListWidget()
-        self.listMembers.setObjectName("memberList")
-        self.listMembers.setMaximumWidth(190)
-        row.addWidget(self.listMembers)
-
-        info = QVBoxLayout()
-        self.lblMedia = QLabel("媒体：—")
-        self.lblMedia.setWordWrap(True)
-        self.lblStatus = QLabel("状态：—")
-        self.lblSync = QLabel("")
-        self.lblSync.setObjectName("syncLabel")
-        info.addWidget(self.lblMedia)
-        info.addWidget(self.lblStatus)
-        info.addWidget(self.lblSync)
-        info.addStretch(1)
-        row.addLayout(info, 1)
-        v.addLayout(row)
-
-        # 进度条
-        prow = QHBoxLayout()
-        self.lblCur = QLabel("00:00")
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(0, 0)
-        self.slider.sliderPressed.connect(self._seek_start)
-        self.slider.sliderReleased.connect(self._seek_commit)
-        self.lblDur = QLabel("00:00")
-        prow.addWidget(self.lblCur)
-        prow.addWidget(self.slider, 1)
-        prow.addWidget(self.lblDur)
-        v.addLayout(prow)
-
-        # 控制按钮
-        brow = QHBoxLayout()
-        self.btnPrev = QPushButton("⏮ 上一集")
-        self.btnPrev.setToolTip("切换到播放列表上一个（全房间同步）")
-        self.btnPrev.clicked.connect(lambda: self.engine.user_episode(-1))
-        self.btnToggle = QPushButton("▶ 播放")
-        self.btnToggle.setObjectName("primaryBtn")
-        self.btnToggle.clicked.connect(self.engine.user_toggle_play_pause)
-        self.btnNext = QPushButton("⏭ 下一集")
-        self.btnNext.setToolTip("切换到播放列表下一个（全房间同步）")
-        self.btnNext.clicked.connect(lambda: self.engine.user_episode(+1))
-        self.btnSyncMe = QPushButton("⟳ 以我的进度为准")
-        self.btnSyncMe.clicked.connect(self.engine.user_force_sync_to_me)
-        self.btnLeave = QPushButton("离开房间")
-        self.btnLeave.setObjectName("dangerBtn")
-        self.btnLeave.clicked.connect(self._leave_room)
-        brow.addWidget(self.btnPrev, 2)
-        brow.addWidget(self.btnToggle, 2)
-        brow.addWidget(self.btnNext, 2)
-        brow.addWidget(self.btnSyncMe, 2)
-        brow.addWidget(self.btnLeave, 1)
-        v.addLayout(brow)
-
-        # 日志
-        self.txtLog = QPlainTextEdit()
-        self.txtLog.setReadOnly(True)
-        self.txtLog.setObjectName("logView")
-        self.txtLog.setMaximumBlockCount(300)
-        v.addWidget(self.txtLog, 1)
-        return page
+        return build_room(self)
 
     # ================= 信号接线 =================
 
@@ -488,11 +312,15 @@ class MainWindow(QMainWindow):
         self._sigUpdateResult.connect(self._on_update_result)
         self._sigUpdateReady.connect(self._on_update_ready)
         n = self.net
+        n.sigConnecting.connect(self._on_connecting)
         n.sigConnected.connect(self._on_connected)
+        n.sigConnectionLost.connect(self._on_connection_lost)
         n.sigDisconnected.connect(self._on_disconnected)
         n.sigError.connect(self._on_error)
         n.sigRoomCreated.connect(self._on_room_created)
         n.sigRoomJoined.connect(self._on_room_joined)
+        n.sigRoomResumed.connect(self._on_room_resumed)
+        n.sigResumeFailed.connect(self._on_resume_failed)
         n.sigState.connect(self._on_remote_state)
         n.sigMembers.connect(self._on_members)
         n.sigNotice.connect(self._log)
@@ -693,15 +521,43 @@ class MainWindow(QMainWindow):
 
     # ================= 网络回调 =================
 
+    def _on_connecting(self, attempt: int, delay_ms: int) -> None:
+        if attempt <= 1:
+            self.lblConn.setText("● 连接中…")
+        else:
+            self.lblConn.setText(f"● 重连中（第 {attempt} 次）")
+        self.lblConn.setStyleSheet("color:#e3b341;")
+        if self.stack.currentIndex() == 1 and attempt in (2, 4, 6, 8):
+            self._log(f"正在重连（第 {attempt} 次，{delay_ms / 1000:.1f}s 后重试）…")
+
     def _on_connected(self) -> None:
         self.lblConn.setText("● 已连接")
         self.lblConn.setStyleSheet("color:#3dd68c;")
-        self.status.showMessage("已连接服务器", 2000)
+        if self.stack.currentIndex() == 1 and self.room_code:
+            self._resuming = True
+            self.status.showMessage("已重新连上服务器，正在恢复房间…", 4000)
+            self._log("已重新连上服务器，正在恢复房间…")
+        else:
+            self.status.showMessage("已连接服务器", 2000)
         if self._pending:
             pending, self._pending = self._pending, None
             self._do_pending(pending)
 
+    def _on_connection_lost(self, reason: str) -> None:
+        """意外掉线：房间与成员身份都保留，只显示重连状态，绝不主动退房。"""
+        self.lblConn.setText("● 重连中…")
+        self.lblConn.setStyleSheet("color:#e3b341;")
+        self.lblRtt.setText("")
+        if self.stack.currentIndex() == 1:
+            self._log(f"⚠ 连接中断（{reason}），正在自动重连；房间与播放器状态都保留")
+            self.status.showMessage("连接中断，正在自动重连…", 8000)
+        else:
+            self.status.showMessage(f"连接中断：{reason}", 4000)
+
     def _on_disconnected(self, reason: str) -> None:
+        """连接线程彻底结束（主动关闭或已无法恢复）时的兜底。"""
+        if self._closing:
+            return
         self.lblConn.setText("● 未连接")
         self.lblConn.setStyleSheet("color:#e5534b;")
         self.lblRtt.setText("")
@@ -710,6 +566,28 @@ class MainWindow(QMainWindow):
             self.room_code = ""
             self.stack.setCurrentIndex(0)
             self.status.showMessage("与服务器断开，已退出房间", 4000)
+
+    def _on_room_resumed(self, room: str, state: Optional[dict], members: list) -> None:
+        """重连后服务器原地恢复了成员身份（房间还在、宽限期内）。"""
+        self._resuming = False
+        if self.stack.currentIndex() != 1 or self.room_code != room:
+            self._enter_room(room, state, members)
+            self._log(f"已恢复房间 {room}")
+            return
+        self._on_members(members)
+        self.engine.enter_room(state)   # 重新对齐进度与播放/暂停
+        self._log("✓ 已恢复房间，正在按服务器时间对齐进度…")
+        self.status.showMessage("已恢复房间", 3000)
+
+    def _on_resume_failed(self, message: str) -> None:
+        """房间已解散/身份过期：这时才真正回主页。"""
+        self._resuming = False
+        self._log(f"⚠ 房间无法恢复：{message}")
+        if self.stack.currentIndex() == 1:
+            self.engine.leave_room()
+            self.room_code = ""
+            self.stack.setCurrentIndex(0)
+            self.status.showMessage(f"房间已不存在（{message}），请重新创建或加入", 6000)
 
     def _on_error(self, message: str) -> None:
         self._log(f"⚠ {message}")
@@ -742,7 +620,11 @@ class MainWindow(QMainWindow):
     def _on_members(self, members: list) -> None:
         self.listMembers.clear()
         for m in members:
-            item = QListWidgetItem(f"👤 {m.get('name', '匿名')}")
+            name = m.get("name", "匿名")
+            online = bool(m.get("online", True))
+            item = QListWidgetItem(f"👤 {name}" if online else f"👤 {name}（离线，等待重连）")
+            if not online:
+                item.setForeground(QColor("#8b949e"))
             self.listMembers.addItem(item)
 
     def _broadcast_state(self, state: dict) -> None:
@@ -755,7 +637,10 @@ class MainWindow(QMainWindow):
 
     def _on_local_state(self, snap: Optional[Snapshot]) -> None:
         if snap is None:
-            self.lblStatus.setText("状态：未检测到 PotPlayer")
+            if self.stack.currentIndex() == 1:
+                self.lblStatus.setText("状态：等待 PotPlayer 打开（房间保留）")
+            else:
+                self.lblStatus.setText("状态：未检测到 PotPlayer")
             return
         self.lblStatus.setText(f"状态：{STATUS_TEXT.get(snap.status, '未知')}")
         self.btnToggle.setText("⏸ 暂停" if snap.status == STATUS_RUNNING else "▶ 播放")
@@ -794,6 +679,7 @@ class MainWindow(QMainWindow):
         self.txtLog.appendPlainText(f"[{datetime.now():%H:%M:%S}] {text}")
 
     def closeEvent(self, event) -> None:
+        self._closing = True
         self._persist()
         self.net.leave_room()
         self.net.shutdown()

@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
+import diagnostics
+
 
 def main() -> int:
     if "--version" in sys.argv:
@@ -27,17 +29,17 @@ def main() -> int:
         return 0
 
     if "--debug" in sys.argv:
-        logging.basicConfig(level=logging.DEBUG,
-                            format="%(asctime)s [%(name)s] %(message)s")
+        log_path = diagnostics.setup(logging.DEBUG)
     else:
-        logging.basicConfig(level=logging.WARNING,
-                            format="%(asctime)s [%(name)s] %(message)s")
+        log_path = diagnostics.setup(logging.INFO)
 
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     app.setApplicationName("PotSync")
     app.setOrganizationName("PotSync")
+    diagnostics.install_qt_message_handler()
+    logging.getLogger("potsync.app").info("启动 PotSync，日志：%s", log_path)
 
     qss = Path(__file__).resolve().parent / "resources" / "style.qss"
     if qss.exists():

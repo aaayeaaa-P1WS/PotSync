@@ -78,6 +78,16 @@ class SyncEngine(QObject):
         self._media_dirs: list = []        # 已知媒体目录（MRU，最多 8 个），同目录直开用
         self._direct_failed = ""           # 加载失败的媒体名，避免反复发起直开
 
+        # 播放器生命周期：房间成员身份与"播放器在不在"完全解耦。
+        # 关掉 PotPlayer（或它崩溃）不广播、不退房、不丢房间状态；
+        # 重新打开后进入 _pending_player_sync，等标题+时长就绪再决定对齐房间还是上报新文件。
+        self._player_known = False         # 是否已建立"在/不在"的基线
+        self._player_present = False
+        self._player_absent_since = 0.0
+        self._pending_player_sync = False
+        self._absent_room_media = ""       # 播放器关闭瞬间房间在放的媒体
+        self._room_moved_while_absent = False   # 关闭期间房间被其他人换了片
+
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_INTERVAL_MS)
         self._poll_timer.timeout.connect(self._poll)
@@ -102,6 +112,12 @@ class SyncEngine(QObject):
         self._failed_media = ""
         self._media_dirs = []
         self._direct_failed = ""
+        self._player_known = False
+        self._player_present = False
+        self._player_absent_since = 0.0
+        self._pending_player_sync = False
+        self._absent_room_media = ""
+        self._room_moved_while_absent = False
         if state:
             self.apply_remote_state(state, initial=True)
 
@@ -116,6 +132,7 @@ class SyncEngine(QObject):
         self._failed_media = ""
         self._media_dirs = []
         self._direct_failed = ""
+        self._pending_player_sync = False
 
     def _cancel_media_follow(self) -> None:
         """本地用户主动操作时取消正在进行的匹配跟随（本地意图优先）。"""
@@ -514,18 +531,106 @@ class SyncEngine(QObject):
         self._last = self.bridge.snapshot()
         self._last_mono = time.monotonic()
 
+    # ---------- 播放器生命周期（关掉/重开 PotPlayer 不掉房） ----------
+
+    def _note_player_presence(self, snap: Optional[Snapshot], now: float) -> None:
+        """跟踪播放器窗口的出现/消失。
+
+        关掉 PotPlayer 只是"失去采样源"：房间、成员身份、房间状态都保留，
+        不广播、不提示离开。重新打开后由 _resync_after_player_appear 决定
+        "对齐回房间进度" 还是 "把新窗口正在放的文件设为房间媒体"。
+        """
+        present = snap is not None
+        if not self._player_known:
+            self._player_known = True
+            self._player_present = present
+            if not present:
+                self._player_absent_since = now
+            return
+        if present == self._player_present:
+            return
+        self._player_present = present
+        if not present:
+            self._player_absent_since = now
+            self._pending_player_sync = False
+            self._mismatch_since = 0.0
+            self._absent_room_media = str((self.room_state or {}).get("media") or "").strip()
+            self._room_moved_while_absent = False
+            if self.in_room:
+                self.sigLog.emit("PotPlayer 已关闭：房间与成员身份保留，重新打开后自动恢复同步")
+                log.info("PotPlayer 窗口消失，房间状态保留")
+            return
+
+        # 播放器重新出现：等这一拍拿到标题/时长后再处理（避免把加载中误判为换片）
+        self._pending_player_sync = True
+        gone = now - self._player_absent_since if self._player_absent_since else 0.0
+        if self.in_room:
+            log.info("PotPlayer 窗口重新出现（关闭了约 %.1fs）", gone)
+            self.sigLog.emit("检测到 PotPlayer 重新打开，正在恢复同步…")
+
+    def _track_room_while_absent(self) -> None:
+        """播放器不在时，记录房间是否被别人换了片（重开时优先跟随房间而不是回弹）。"""
+        if not self.in_room or not self.room_state:
+            return
+        media = str(self.room_state.get("media") or "").strip()
+        if media and self._absent_room_media and media != self._absent_room_media:
+            self._room_moved_while_absent = True
+
+    def _resync_after_player_appear(self, snap: Snapshot) -> None:
+        """新窗口的第一份有效状态：与房间同片则对齐进度，不同片则把新文件设为房间媒体。"""
+        s = self.room_state
+        if not s:
+            # 房间还没有任何状态：交给常规的"首次上报"逻辑
+            self._announced_local = False
+            return
+        remote_media = (s.get("media") or "").strip()
+        if remote_media and media_matches(remote_media, snap.media):
+            self._guard(1.5)
+            self._align_to_state(s)
+            self.sigLog.emit(f"PotPlayer 已重新打开，已对齐房间进度（{snap.media}）")
+            self.sigSyncInfo.emit("✓ 已对齐房间进度")
+            return
+        if self._room_moved_while_absent and remote_media:
+            # 我关着播放器的时候房间已经换片：跟随房间，而不是把旧片回弹给所有人
+            self._room_moved_while_absent = False
+            self._guard(2.0)
+            self.sigLog.emit(f"重新打开前房间已切换到《{remote_media}》，正在跟随…")
+            self._start_media_follow(dict(s))
+            return
+        # 新窗口放的是另一个文件 → 以它作为房间当前媒体，只广播一次
+        self._room_moved_while_absent = False
+        self._guard(2.0)
+        self._last = snap
+        self._last_mono = time.monotonic()
+        self._broadcast(paused=not snap.playing, position=snap.position,
+                        media=snap.media, duration=snap.duration, action="open")
+        self.sigLog.emit(f"PotPlayer 已重新打开：把《{snap.media}》设为房间当前媒体")
+
     # ---------- 周期采样：侦测本地操作 ----------
 
     def _poll(self) -> None:
         snap = self.bridge.snapshot()
         now = time.monotonic()
         prev, prev_mono = self._last, self._last_mono
+        self._note_player_presence(snap, now)
         self._last, self._last_mono = snap, now
         self.sigLocalState.emit(snap)
         self._emit_sync_info(snap)
 
-        if snap is None or not self.in_room or self._guarded() \
-                or self._direct_open is not None:
+        if snap is None:
+            self._track_room_while_absent()
+            return
+        if not self.in_room or self._direct_open is not None:
+            return
+
+        # 播放器刚重新打开：等标题和时长都就绪，再决定"对齐房间"还是"上报新文件"
+        if self._pending_player_sync:
+            if snap.media and snap.duration > 0:
+                self._pending_player_sync = False
+                self._resync_after_player_appear(snap)
+            return
+
+        if self._guarded():
             return
 
         # 入房后，若房间还没有任何状态而本地正在播放 → 由我把本地状态设为房间状态
@@ -560,13 +665,14 @@ class SyncEngine(QObject):
                             action="pause" if not snap.playing else "play")
             return
 
-        # 2) 换片（媒体名或总时长变化；含在 PotPlayer 里直接切集/双击列表文件）
-        if snap.media != prev.media or abs(snap.duration - prev.duration) > 1000:
-            if not snap.media:
-                return  # 加载中转场（标题尚未刷新），下一拍拿到名字再广播
+        # 2) 换片：只认媒体名变化。总时长 0→N 只表示"加载完成"，
+        #    若也算换片，新窗口打开时会重复广播两次 open（对方收到两条换片）。
+        if not snap.media:
+            return  # 标题尚未刷新（加载中转场），下一拍拿到名字再判断
+        if snap.media != prev.media:
             self._broadcast(paused=not snap.playing, position=snap.position,
                             media=snap.media, duration=snap.duration, action="open")
-            self.sigLog.emit(f"检测到切换媒体：{snap.media or '未知'}")
+            self.sigLog.emit(f"检测到切换媒体：{snap.media}")
             return
 
         # 3) 进度突变（播放或暂停中拖动进度条；状态与媒体均未变）
@@ -649,7 +755,13 @@ class SyncEngine(QObject):
 
     def _emit_sync_info(self, snap: Optional[Snapshot]) -> None:
         if snap is None:
-            self.sigSyncInfo.emit("未检测到 PotPlayer")
+            if self.in_room and self.room_state:
+                self.sigSyncInfo.emit("⏳ 等待 PotPlayer 打开（房间保留）")
+            else:
+                self.sigSyncInfo.emit("未检测到 PotPlayer")
+            return
+        if self._pending_player_sync:
+            self.sigSyncInfo.emit("⏳ 恢复同步中…")
             return
         if not self.in_room or not self.room_state:
             self.sigSyncInfo.emit("")

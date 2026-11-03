@@ -193,14 +193,16 @@ def test_http_proxy_choice_and_direct_fallback():
 
         async def fake_session(uri, proxy=None):
             calls.append(proxy)
-            if proxy is not None:
+            if proxy:                  # 2.0 用 "" 表示直连
                 raise OSError("模拟代理握手失败")
-            net._connected_once = True
+            net._session_count += 1
+            net._running = False       # 测试里连上即结束重连循环
 
         net._session = fake_session
         net.sigError.connect(errors.append)
+        net._running = True
         asyncio.run(net._main("example.com", 443))
-        assert calls == ["http://127.0.0.1:20890", None], calls
+        assert calls == ["http://127.0.0.1:20890", ""], calls
         assert not errors, errors
     print("PASS  混合代理环境优先 HTTP，首次失败自动回退直连")
 

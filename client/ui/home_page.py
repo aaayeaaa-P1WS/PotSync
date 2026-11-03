@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""主页：个人资料 / 创建房间 / 加入房间 / 版本与更新。
+"""主页：个人资料 / 创建房间 / 加入房间。
 
 版式参考 Windows 11 设置应用的「卡片 + 分组」：标题区、分组卡片、
 右对齐的说明文字与底部工具条。控件仍挂回主窗口（self.editNickname 等），
@@ -11,8 +11,6 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
                              QWidget)
-
-from version import APP_VERSION
 
 
 def _card(title: str, desc: str = "", spacing: int = 10) -> tuple:
@@ -163,21 +161,6 @@ def build_home(window) -> QWidget:
     v.addWidget(card)
 
     v.addStretch(1)
-
-    # ---------------- 底部工具条
-    footer = QHBoxLayout()
-    footer.setSpacing(8)
-    lbl_ver = QLabel(f"v{APP_VERSION}")
-    lbl_ver.setObjectName("versionLabel")
-    footer.addWidget(lbl_ver)
-    footer.addStretch(1)
-    window.btnUpdate = QPushButton("检查更新")
-    window.btnUpdate.setObjectName("ghostBtn")
-    window.btnUpdate.setFlat(True)
-    window.btnUpdate.setCursor(Qt.PointingHandCursor)
-    window.btnUpdate.clicked.connect(lambda: window._check_update(silent=False))
-    footer.addWidget(window.btnUpdate)
-    v.addLayout(footer)
 
     body_row.addWidget(column, 1)
     return page

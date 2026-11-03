@@ -18,13 +18,13 @@ QWidget {
 }
 
 QMainWindow, QDialog, QMessageBox {
-    background: $bg;
+    background: $window_base;
     color: $text;
 }
 
 QWidget#root {
     background: qlineargradient(x1:0, y1:0, x2:0.35, y2:1,
-                                stop:0 $bg, stop:1 $bg_end);
+                                stop:0 $bg_a, stop:1 $bg_end_a);
 }
 
 QWidget:disabled {
@@ -34,19 +34,19 @@ QWidget:disabled {
 /* ---------- 卡片 ---------- */
 
 QFrame#card {
-    background: $surface;
+    background: $surface_a;
     border: 1px solid $border;
     border-radius: 10px;
 }
 
 QFrame#cardFlat {
-    background: $surface;
+    background: $surface_alt_a;
     border: none;
     border-radius: 10px;
 }
 
 QFrame#divider {
-    background: $border;
+    background: $border_a;
     max-height: 1px;
     border: none;
 }
@@ -153,7 +153,7 @@ QLabel#badge {
 /* ---------- 输入 ---------- */
 
 QLineEdit {
-    background: $surface;
+    background: $field_a;
     border: 1px solid $border;
     border-radius: $radius_small;
     padding: 7px 10px;
@@ -168,18 +168,18 @@ QLineEdit:hover {
 
 QLineEdit:focus {
     border: 1px solid $accent;
-    background: $surface;
+    background: $field_a;
 }
 
 QLineEdit[readOnly="true"] {
-    background: $surface_alt;
+    background: $surface_alt_a;
     color: $text_dim;
 }
 
 /* ---------- 按钮 ---------- */
 
 QPushButton {
-    background: $surface_alt;
+    background: $surface_alt_a;
     border: 1px solid $border;
     border-radius: $radius_small;
     padding: 7px 16px;
@@ -188,12 +188,12 @@ QPushButton {
 }
 
 QPushButton:hover {
-    background: $surface_hover;
+    background: $surface_hover_a;
     border-color: $border_strong;
 }
 
 QPushButton:pressed {
-    background: $selected;
+    background: $selected_a;
 }
 
 QPushButton:focus {
@@ -201,7 +201,7 @@ QPushButton:focus {
 }
 
 QPushButton:disabled {
-    background: $surface_alt;
+    background: $surface_alt_a;
     color: $text_muted;
     border-color: $border;
 }
@@ -237,7 +237,7 @@ QPushButton#ghostBtn, QPushButton#smallBtn {
 }
 
 QPushButton#ghostBtn:hover, QPushButton#smallBtn:hover {
-    background: $surface_hover;
+    background: $surface_hover_a;
     color: $text;
     border-color: transparent;
 }
@@ -378,7 +378,7 @@ QListWidget#memberList::item:selected {
 /* ---------- 日志 ---------- */
 
 QPlainTextEdit#logView {
-    background: $log_bg;
+    background: $log_bg_a;
     border: 1px solid $border;
     border-radius: $radius;
     padding: 8px 10px;
@@ -390,8 +390,8 @@ QPlainTextEdit#logView {
 /* ---------- 状态栏 ---------- */
 
 QStatusBar {
-    background: transparent;
-    border-top: 1px solid $border;
+    background: $status_a;
+    border-top: 1px solid $border_a;
     color: $text_muted;
     font-size: 12px;
 }
@@ -409,7 +409,7 @@ QStatusBar QLabel {
 /* ---------- 侧边栏 ---------- */
 
 QFrame#sidebar {
-    background: $sidebar;
+    background: $sidebar_a;
     border: none;
     border-right: 1px solid $border;
 }

@@ -33,7 +33,7 @@ from relay import EmbeddedServer
 from sync_engine import SyncEngine
 from tunnel import PublicEndpoint, TunnelManager
 from ui.home_page import build_home
-from ui.icons import logo
+from ui import appicon
 from ui.room_page import build_room
 from ui.settings_page import build_settings
 from ui.sidebar import Sidebar
@@ -129,6 +129,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} 一起看 v{APP_VERSION} · PotPlayer 同步播放")
         self.resize(1080, 720)
         self.setMinimumSize(920, 600)
+        # 半透明窗口：Win11 22H2+ 有 Mica 背板时才开，避免在旧系统上变成
+        # “透出桌面、文字发虚”的廉价效果。
+        self._translucent = theme.translucent_enabled()
+        if self._translucent:
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+            self.setAttribute(Qt.WA_NoSystemBackground, True)
 
         self.cfg = load_config()
         self.bridge = PotPlayerBridge()
@@ -186,6 +192,7 @@ class MainWindow(QMainWindow):
         if not silent:
             self.status.showMessage("正在检查更新…", 5000)
         self.btnUpdate.setEnabled(False)
+        self.lblUpdateHint.setText("正在检查…")
         import threading
 
         def work() -> None:
@@ -202,15 +209,18 @@ class MainWindow(QMainWindow):
                           info: Optional[updater.UpdateInfo], error: str) -> None:
         self.btnUpdate.setEnabled(True)
         if error:
+            self.lblUpdateHint.setText("检查失败")
             if not silent:
                 QMessageBox.warning(self, "检查更新", f"检查更新失败：\n{error}")
             return
         if info is None:
+            self.lblUpdateHint.setText(f"已是最新版本（v{APP_VERSION}）")
             if not silent:
                 QMessageBox.information(self, "检查更新",
                                         f"当前已是最新版本（v{APP_VERSION}）。")
             return
         # 发现新版本
+        self.lblUpdateHint.setText(f"发现新版本 v{info.version.lstrip('vV')}")
         notes = (info.notes or "").strip()[:500]
         ver = info.version.lstrip("vV")
         text = f"发现新版本 v{ver}（当前 v{APP_VERSION}）。"
@@ -386,6 +396,13 @@ class MainWindow(QMainWindow):
         label = getattr(self, "lblThemeMode", None)
         if label is not None:
             label.setText(f"当前：跟随系统 · {'深色' if pal.mode == 'dark' else '浅色'}")
+        accent_label = getattr(self, "lblAccent", None)
+        if accent_label is not None:
+            accent_label.setText(f"强调色：跟随系统 · {pal.accent.upper()}")
+        glass_label = getattr(self, "lblTranslucent", None)
+        if glass_label is not None:
+            glass_label.setText("半透明：跟随系统 · "
+                                + ("已启用（Mica/Acrylic）" if pal.translucent else "已关闭"))
         if getattr(self, "_members", None):
             self._on_members(self._members)
         self.update()
@@ -393,7 +410,11 @@ class MainWindow(QMainWindow):
     def _apply_window_icon(self, pal=None) -> None:
         pal = pal or theme.current()
         try:
-            self.setWindowIcon(QIcon(logo(96, pal.accent)))
+            ic = appicon.icon(pal.accent)
+            self.setWindowIcon(ic)
+            app = QApplication.instance()
+            if app is not None:
+                app.setWindowIcon(ic)
         except Exception:  # 图标失败不影响主流程
             log.debug("设置窗口图标失败", exc_info=True)
 
@@ -804,7 +825,14 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        theme.apply_titlebar(self, theme.current().mode == "dark")
+        pal = theme.current()
+        theme.apply_titlebar(self, pal.mode == "dark")
+        if getattr(self, "_translucent", False):
+            if not theme.enable_backdrop(self, pal):
+                # 背板没开起来：退回不透明底色，保证可读性
+                self._translucent = False
+                fallback = theme.build_palette(pal.mode, pal.accent, translucent=False)
+                theme.apply(QApplication.instance(), fallback.mode, fallback.accent)
 
     def closeEvent(self, event) -> None:
         self._closing = True

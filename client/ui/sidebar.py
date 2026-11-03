@@ -10,9 +10,7 @@ from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel,
                              QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
-from version import APP_VERSION
-
-from ui import icons
+from ui import appicon, icons
 
 NAV_ITEMS = (
     (0, "home", "主页"),
@@ -55,7 +53,7 @@ class Sidebar(QFrame):
         text_box.setSpacing(0)
         name = QLabel("PotSync")
         name.setObjectName("brandName")
-        self._version = QLabel(f"v{APP_VERSION}")
+        self._version = QLabel("一起看 · 同步播放")
         self._version.setObjectName("versionLabel")
         text_box.addWidget(name)
         text_box.addWidget(self._version)
@@ -142,7 +140,7 @@ class Sidebar(QFrame):
 
     def refresh(self, pal, mode: str, accent: str):
         """主题/强调色变化后重新生成图标。"""
-        self._logo.setPixmap(icons.logo(30, accent))
+        self._logo.setPixmap(appicon.pixmap(30, accent, self.devicePixelRatioF()))
         for _index, (btn, kind) in self._buttons.items():
             btn.setIcon(icons.icon(kind, pal.text_dim, pal.accent_text, 18))
         is_dark = mode == "dark"

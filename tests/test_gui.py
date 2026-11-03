@@ -87,6 +87,26 @@ def main() -> int:
     assert not w.windowIcon().isNull()
     print("PASS  深浅色主题切换与窗口图标")
 
+    # 强调色跟随系统：图标与强调色变体都要能生成（3 号同步箭头图形）
+    from ui import appicon
+    for accent in ("#0067C0", "#107C10", "#8764B8", "#C2410C"):
+        assert not appicon.icon(accent).isNull(), accent
+        assert not appicon.pixmap(24, accent).isNull(), accent
+    pal = theme.build_palette("dark", "#8764B8")
+    assert pal.accent == theme.fit_accent("#8764B8", "dark")
+    print(f"PASS  强调色跟随（多色图标生成，当前 {pal.accent}）")
+
+    # 半透明配色：开启时底色是 rgba，关闭时退回不透明 hex
+    glass = theme.build_palette("dark", "#8764B8", translucent=True)
+    solid = theme.build_palette("dark", "#8764B8", translucent=False)
+    g_bg = glass.tokens()["bg_a"]
+    s_bg = solid.tokens()["bg_a"]
+    assert g_bg.startswith("rgba(") and not g_bg.endswith("1.00)"), g_bg
+    assert s_bg.endswith("1.00)"), s_bg
+    assert glass.tokens()["window_base"] == "transparent"
+    assert solid.tokens()["window_base"] == solid.bg
+    print("PASS  半透明配色（rgba 底色 / 关闭时退回不透明）")
+
     # 一键复制邀请链接
     w.room_code = "AB12CD"
     w._copy_invite_link()

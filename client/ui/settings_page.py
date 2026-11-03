@@ -59,17 +59,37 @@ def build_settings(window) -> QWidget:
     window.lblThemeMode = QLabel("当前：跟随系统")
     window.lblThemeMode.setObjectName("statusLine")
     box.addWidget(window.lblThemeMode)
+    window.lblAccent = QLabel("强调色：跟随系统")
+    window.lblAccent.setObjectName("statusLine")
+    box.addWidget(window.lblAccent)
+    window.lblTranslucent = QLabel("半透明：跟随系统")
+    window.lblTranslucent.setObjectName("statusLine")
+    box.addWidget(window.lblTranslucent)
     tip = QLabel("在「Windows 设置 → 个性化 → 颜色」里切换模式或主题色，"
-                 "PotSync 会在 1.5 秒内自动适配，无需重启。")
+                 "PotSync 会在 1.5 秒内自动适配，无需重启。"
+                 "半透明使用 Windows 11 的 Mica/Acrylic 材质；"
+                 "想强制不透明可设环境变量 POTSYNC_OPAQUE=1。")
     tip.setObjectName("tip")
     tip.setWordWrap(True)
     box.addWidget(tip)
     v.addWidget(card)
 
     # ---------------- 关于
-    card, box = _card("关于")
-    box.addWidget(_kv("应用", f"{APP_NAME} {APP_VERSION}"))
-    box.addWidget(_kv("协议", "PotSync 2.0 · 断线自动重连 · 房间状态保留"))
+    card, box = _card("关于", "版本号与更新检查都在这里，主页只保留日常操作。")
+    box.addWidget(_kv("应用", f"{APP_NAME}"))
+    box.addWidget(_kv("版本", f"v{APP_VERSION}"))
+    box.addWidget(_kv("同步协议", "PotSync 2.0 · 断线自动重连 · 房间状态保留"))
+
+    row = QHBoxLayout()
+    window.btnUpdate = QPushButton("检查更新")
+    window.btnUpdate.setObjectName("outlineBtn")
+    window.btnUpdate.clicked.connect(lambda: window._check_update(silent=False))
+    row.addWidget(window.btnUpdate)
+    window.lblUpdateHint = QLabel("")
+    window.lblUpdateHint.setObjectName("tip")
+    row.addWidget(window.lblUpdateHint)
+    row.addStretch(1)
+    box.addLayout(row)
     v.addWidget(card)
 
     # ---------------- 日志
@@ -85,11 +105,7 @@ def build_settings(window) -> QWidget:
     window.btnOpenLog = QPushButton("打开日志目录")
     window.btnOpenLog.setObjectName("outlineBtn")
     window.btnOpenLog.clicked.connect(window._open_log_dir)
-    window.btnUpdateSettings = QPushButton("检查更新")
-    window.btnUpdateSettings.setObjectName("outlineBtn")
-    window.btnUpdateSettings.clicked.connect(lambda: window._check_update(silent=False))
     row.addWidget(window.btnOpenLog)
-    row.addWidget(window.btnUpdateSettings)
     row.addStretch(1)
     box.addLayout(row)
     v.addWidget(card)

@@ -80,7 +80,15 @@ def system_mode() -> str:
 
 
 def system_accent() -> str:
-    """读取系统强调色（注册表里是 ABGR），失败返回 Win11 默认蓝。"""
+    """读取系统强调色（注册表里是 ABGR），失败返回 Win11 默认蓝。
+
+    环境变量 ``POTSYNC_ACCENT=#RRGGBB`` 可强制指定（截图/测试用）。
+    """
+    forced = os.environ.get("POTSYNC_ACCENT", "").strip()
+    if forced:
+        color = QColor(forced)
+        if color.isValid():
+            return color.name(QColor.HexRgb)
     if sys.platform != "win32":
         return DEFAULT_ACCENT
     import winreg
@@ -135,6 +143,7 @@ def fit_accent(accent: str, mode: str) -> str:
 class Palette:
     mode: str
     accent: str
+    translucent: bool
 
     bg: str
     bg_end: str
@@ -162,6 +171,28 @@ class Palette:
 
     def tokens(self) -> dict:
         data = {k: v for k, v in self.__dict__.items()}
+        # 半透明版本：有系统背板（Mica/亚克力）时用 alpha，否则退回不透明，
+        # 保证任何环境下文字对比度都不低于不透明方案。
+        # 半透明但不牺牲可读性：窗口 0.90、卡片 0.94、日志 0.96。
+        # 这样即使背后是白底网页，正文对比度也在 10:1 以上。
+        a_win = 0.88 if self.translucent else 1.0
+        a_side = 0.80 if self.translucent else 1.0
+        a_card = 0.93 if self.translucent else 1.0
+        a_alt = 0.70 if self.translucent else 1.0
+        a_log = 0.95 if self.translucent else 1.0
+        a_field = 0.95 if self.translucent else 1.0
+        data["bg_a"] = _rgba(self.bg, a_win)
+        data["bg_end_a"] = _rgba(self.bg_end, a_win)
+        data["window_base"] = "transparent" if self.translucent else self.bg
+        data["sidebar_a"] = _rgba(self.sidebar, a_side)
+        data["surface_a"] = _rgba(self.surface, a_card)
+        data["surface_alt_a"] = _rgba(self.surface_alt, a_alt)
+        data["surface_hover_a"] = _rgba(self.surface_hover, 0.82 if self.translucent else 1.0)
+        data["log_bg_a"] = _rgba(self.log_bg, a_log)
+        data["field_a"] = _rgba(self.surface, a_field)
+        data["selected_a"] = _rgba(self.selected, 0.72 if self.translucent else 1.0)
+        data["status_a"] = _rgba(self.sidebar, 0.86 if self.translucent else 1.0)
+        data["border_a"] = _rgba(self.border, 0.85 if self.translucent else 1.0)
         data["radius"] = "8px"
         data["radius_small"] = "6px"
         data["font_family"] = ('"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", '
@@ -170,9 +201,103 @@ class Palette:
         return data
 
 
-def build_palette(mode: Optional[str] = None, accent: Optional[str] = None) -> Palette:
+def _rgba(color: str, alpha: float) -> str:
+    """把 #RRGGBB 转成 QSS 的 rgba(r, g, b, a)，a 取 0..1。"""
+    c = QColor(color)
+    a = max(0.0, min(1.0, alpha))
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {a:.2f})"
+
+
+# --------------------------------------------------------------------------
+# 系统背板（Mica / 亚克力）：半透明窗口的基础
+# --------------------------------------------------------------------------
+
+# DWMWA_SYSTEMBACKDROP_TYPE = 38（Win11 22H2+）
+_DWMWA_SYSTEMBACKDROP_TYPE = 38
+_DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+_DWMSBT_MICA = 2
+_DWMSBT_ACRYLIC = 3
+
+
+def _win_build() -> int:
+    try:
+        return int(sys.getwindowsversion().build)
+    except Exception:
+        return 0
+
+
+def backdrop_available() -> bool:
+    """当前环境是否支持系统背板（可用 POTSYNC_OPAQUE=1 强制关闭）。"""
+    if os.environ.get("POTSYNC_OPAQUE", "").strip() not in ("", "0", "false", "False"):
+        return False
+    if sys.platform != "win32":
+        return False
+    return _win_build() >= 22621      # Win11 22H2+ 才有 DWMWA_SYSTEMBACKDROP_TYPE
+
+
+def enable_backdrop(widget, palette: Optional[Palette] = None) -> bool:
+    """给窗口开 Mica 背板；失败返回 False（调用方据此回退不透明底色）。"""
+    if widget is None or sys.platform != "win32":
+        return False
+    if not backdrop_available():
+        return False
+    palette = palette or current()
+    try:
+        hwnd = int(widget.winId())
+        if not hwnd:
+            return False
+        handle = ctypes.windll.dwmapi
+        ok = False
+        # 默认用 Acrylic（模糊窗口后面的内容，半透明感最明显）；
+        # POTSYNC_BACKDROP=mica 可切到跟随壁纸的 Mica。
+        kind = os.environ.get("POTSYNC_BACKDROP", "mica").strip().lower()
+        target = _DWMSBT_MICA if kind == "mica" else _DWMSBT_ACRYLIC
+        try:
+            value = ctypes.c_int(target)
+            result = handle.DwmSetWindowAttribute(
+                hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(value),
+                ctypes.sizeof(value))
+            ok = result == 0
+        except Exception:
+            ok = False
+        if not ok:
+            # 老一点儿的 Win11 只有“亚克力/云母”旧接口，失败就算了
+            try:
+                value = ctypes.c_int(1)   # DWMSBT_MAINWINDOW（旧名 Mica）
+                result = handle.DwmSetWindowAttribute(
+                    hwnd, _DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(value),
+                    ctypes.sizeof(value))
+                ok = result == 0
+            except Exception:
+                ok = False
+        # 深浅色标题栏与背板一起设置（20 是新版，19 兼容旧版）
+        try:
+            dark = ctypes.c_int(1 if palette.mode == "dark" else 0)
+            for attribute in (_DWMWA_USE_IMMERSIVE_DARK_MODE, 19):
+                if handle.DwmSetWindowAttribute(
+                        hwnd, attribute, ctypes.byref(dark),
+                        ctypes.sizeof(dark)) == 0:
+                    break
+        except Exception:
+            pass
+        return ok
+    except Exception as exc:
+        log.debug("开启系统背板失败：%s", exc)
+        return False
+
+
+def translucent_enabled() -> bool:
+    if os.environ.get("POTSYNC_OPAQUE", "").strip() not in ("", "0", "false", "False"):
+        return False
+    return backdrop_available()
+
+
+def build_palette(mode: Optional[str] = None, accent: Optional[str] = None,
+                  translucent: Optional[bool] = None) -> Palette:
     mode = mode or system_mode()
     accent = fit_accent(accent or system_accent(), mode)
+    if translucent is None:
+        translucent = backdrop_available()
 
     if mode == "light":
         bg, bg_end = "#f4f5f7", "#e9edf3"
@@ -201,7 +326,7 @@ def build_palette(mode: Optional[str] = None, accent: Optional[str] = None) -> P
     accent_soft_strong = blend(accent, surface, 0.68 if mode == "light" else 0.60)
 
     return Palette(
-        mode=mode, accent=accent,
+        mode=mode, accent=accent, translucent=bool(translucent),
         bg=bg, bg_end=bg_end,
         surface=surface, surface_alt=surface_alt, surface_hover=surface_hover,
         border=border, border_strong=border_strong,
@@ -352,6 +477,8 @@ def apply(app: Optional[QApplication], mode: Optional[str] = None,
         app.setStyleSheet(_qss(palette))
         for widget in app.topLevelWidgets():
             apply_titlebar(widget, palette.mode == "dark")
+            if palette.translucent:
+                enable_backdrop(widget, palette)
     return palette
 
 

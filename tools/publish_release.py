@@ -120,7 +120,7 @@ def main() -> int:
     args = ap.parse_args()
 
     tag = args.tag
-    notes = ROOT / "release-notes-v2.0.0.md"
+    notes = ROOT / f"release-notes-{tag}.md"
     if not notes.exists():
         sys.exit(f"缺少发布正文：{notes}")
     body = notes.read_text(encoding="utf-8")
@@ -129,6 +129,9 @@ def main() -> int:
     for f in (exe, sha):
         if not f.exists():
             sys.exit(f"缺少资产：{f}")
+    digest = sha.read_text(encoding="utf-8").split()[0].strip()
+    if "SHA-256" not in body:
+        body = body.rstrip() + f"\n\nSHA-256：`{digest}`\n"
 
     if args.dry_run:
         print(f"dry-run：资产与正文已就绪，tag={tag}")

@@ -53,9 +53,11 @@ def setup(level: int = logging.INFO, filename: Optional[Path] = None) -> Path:
     except OSError:
         pass
 
-    console = logging.StreamHandler(sys.stderr)
-    console.setFormatter(fmt)
-    root.addHandler(console)
+    # windowed 打包版没有 stderr，只有在有控制台时（源码运行）才加屏幕输出
+    if sys.stderr is not None:
+        console = logging.StreamHandler(sys.stderr)
+        console.setFormatter(fmt)
+        root.addHandler(console)
 
     # 原生崩溃栈：写进单独文件，追加模式，避免和文本日志互相截断
     try:
@@ -101,8 +103,19 @@ def install_qt_message_handler() -> None:
     }
     log = logging.getLogger("potsync.qt")
 
+    # 打包版里 Qt 找不到字体目录、离屏平台插件不支持 propagateSizeHints，
+    # 都只影响观感且会在每次构建控件时重复刷屏，这里直接丢掉，避免淹没真正的错误。
+    noisy = (
+        "QFontDatabase: Cannot find font directory",
+        "Note that Qt no longer ships fonts",
+        "This plugin does not support propagateSizeHints()",
+    )
+
     def handler(mode, context, message) -> None:
-        log.log(level_map.get(mode, logging.INFO), "%s", message)
+        text = str(message)
+        if any(text.startswith(prefix) or prefix in text for prefix in noisy):
+            return
+        log.log(level_map.get(mode, logging.INFO), "%s", text)
 
     qInstallMessageHandler(handler)
 

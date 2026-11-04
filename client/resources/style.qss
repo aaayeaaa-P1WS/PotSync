@@ -500,3 +500,34 @@ QMessageBox {
 QMessageBox QLabel {
     color: $text;
 }
+
+/* ---------- 更新内容 / 说明浮层 ---------- */
+
+QLabel#notesTitle {
+    color: $text;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+QLabel#notesSub {
+    color: $text_dim;
+    font-size: 13px;
+}
+
+QTextBrowser#notesView {
+    background: transparent;
+    border: none;
+    padding: 2px 4px 0 0;
+}
+
+QFrame#hintCard {
+    background: $surface;
+    border: 1px solid $border_strong;
+    border-radius: 8px;
+}
+
+QLabel#hintText {
+    color: $text;
+    background: transparent;
+    border: none;
+}

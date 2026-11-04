@@ -12,6 +12,8 @@ from PyQt5.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
                              QWidget)
 
+from ui.infobutton import attach_hint
+
 
 def _card(title: str, desc: str = "", spacing: int = 10) -> tuple:
     """返回 (卡片, 内容布局)。卡片自带标题与说明，内容从分割线下方开始。"""
@@ -109,16 +111,18 @@ def build_home(window) -> QWidget:
     # ---------------- 创建房间
     card, box = _card("创建房间", "由你来当主机，好友通过房间号加入。")
     window.chkHost = QCheckBox("在本机启动中继服务器")
-    window.chkHost.setToolTip("无需单独部署服务器：建房时自动在本机启动内置中继。\n"
-                              "勾选下方内网穿透即可让异地好友加入。")
+    attach_hint(window.chkHost,
+                "建房时自动在本机启动中继服务器。只和同一局域网的朋友一起看，"
+                "不用勾内网穿透。")
     window.chkHost.toggled.connect(window._toggle_host_mode)
     box.addWidget(window.chkHost)
 
     tunnel_row = QHBoxLayout()
     tunnel_row.setContentsMargins(22, 0, 0, 0)
     window.chkTunnel = QCheckBox("内网穿透（自动生成公网地址，异地好友可直接加入）")
-    window.chkTunnel.setToolTip("通过 Cloudflare 免费隧道把本机服务器暴露到公网，\n"
-                                "首次使用自动下载组件（约 30MB），无需注册。")
+    attach_hint(window.chkTunnel,
+                "通过 Cloudflare 免费隧道把本机服务器暴露到公网，自动生成邀请链接。"
+                "首次使用会自动下载组件（约 30MB），无需注册。")
     tunnel_row.addWidget(window.chkTunnel, 1)
     box.addLayout(tunnel_row)
 
@@ -149,7 +153,7 @@ def build_home(window) -> QWidget:
     window.btnJoinClip = QPushButton("从剪贴板读取")
     window.btnJoinClip.setObjectName("outlineBtn")
     window.btnJoinClip.setMinimumHeight(36)
-    window.btnJoinClip.setToolTip("读取剪贴板里的邀请链接并直接加入")
+    attach_hint(window.btnJoinClip, "读取剪贴板里的邀请链接并直接加入")
     window.btnJoinClip.clicked.connect(window._join_from_clipboard)
     row.addWidget(window.btnJoin, 1)
     row.addWidget(window.btnJoinClip)

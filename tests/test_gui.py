@@ -99,10 +99,36 @@ def main() -> int:
     # 设置页：冗余说明收进 ⓘ，按钮有边框；更新说明可滚动
     tips = w.settings_page.findChildren(type(w.btnUpdate), "infoBtn")
     assert len(tips) >= 3, len(tips)
-    assert all(t.toolTip() for t in tips), "ⓘ 必须有悬浮说明"
+    assert all(t.text_hint() for t in tips), "ⓘ 必须自带悬浮说明"
+    assert all(not t.toolTip() for t in tips), "ⓘ 不再使用系统 tooltip（会延迟 700ms）"
     assert w.btnUpdate.objectName() == "outlineBtn"
     assert w.lblUpdateHint.text() == ""
-    print(f"PASS  设置页精简（{len(tips)} 个 ⓘ 提示 / 检查更新按钮有边框）")
+    assert w.btnNotes.text() == "更新内容"
+    print(f"PASS  设置页精简（{len(tips)} 个 ⓘ 即时说明 / 更新内容入口）")
+
+    # 更新内容：纯文本解析 + 覆盖到 2.0.0
+    import whatsnew
+    secs = whatsnew.sections()
+    versions = [v for v, _ in secs]
+    assert "2.2.2" in versions and "2.0.0" in versions, versions
+    text = whatsnew.load_text()
+    assert "#" not in text and "**" not in text, "更新内容不能带 Markdown 符号"
+    one = dict(secs)["2.2.0"]
+    assert 2 <= len(one) <= 6, len(one)
+    sec = whatsnew.section_for("v2.2.1")
+    assert sec is not None and sec[1] == dict(secs)["2.2.1"], sec
+    print("PASS  更新内容（纯文本 / 含 2.0.0 / 按版本取用）")
+
+    # 更新弹窗：内容可滚动，且按钮文案明确
+    from ui.notes_dialog import NotesDialog
+    dlg = NotesDialog(w, whatsnew.recent_sections(3))
+    dlg.show()
+    app.processEvents()
+    assert dlg.view.verticalScrollBar().maximum() > 0, "更新内容需要可滚动"
+    assert dlg.btnAccept.text() == "知道了", "缺少关闭按钮"
+    dlg.close()
+    dlg.deleteLater()
+    print("PASS  更新内容对话框（可滚动 / 有按钮）")
 
     # 半透明配色：开启时底色是 rgba，关闭时退回不透明 hex
     glass = theme.build_palette("dark", "#8764B8", translucent=True)

@@ -10,6 +10,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
                              QVBoxLayout, QWidget)
 
+from ui.infobutton import InfoButton
 from version import APP_NAME, APP_VERSION
 
 
@@ -26,14 +27,8 @@ def _card(title: str, spacing: int = 8) -> tuple:
 
 
 def _info(text: str) -> QPushButton:
-    """圈 i 按钮：说明放进 tooltip，界面上只留一个图标。"""
-    btn = QPushButton("i")
-    btn.setObjectName("infoBtn")
-    btn.setFixedSize(18, 18)
-    btn.setCursor(Qt.WhatsThisCursor)
-    btn.setToolTip(text)
-    btn.setFocusPolicy(Qt.NoFocus)
-    return btn
+    """圈 i 按钮：说明放进悬停浮层，界面上只留一个图标。"""
+    return InfoButton(text)
 
 
 def _row(key: str, value: QLabel, info: str = "") -> QWidget:
@@ -98,6 +93,10 @@ def build_settings(window) -> QWidget:
     window.btnUpdate.setObjectName("outlineBtn")
     window.btnUpdate.clicked.connect(lambda: window._check_update(silent=False))
     row.addWidget(window.btnUpdate)
+    window.btnNotes = QPushButton("更新内容")
+    window.btnNotes.setObjectName("outlineBtn")
+    window.btnNotes.clicked.connect(window._show_notes)
+    row.addWidget(window.btnNotes)
     window.lblUpdateHint = QLabel("")
     window.lblUpdateHint.setObjectName("tip")
     row.addWidget(window.lblUpdateHint)

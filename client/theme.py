@@ -208,6 +208,16 @@ def _rgba(color: str, alpha: float) -> str:
     return f"rgba({c.red()}, {c.green()}, {c.blue()}, {a:.2f})"
 
 
+def dialog_background(palette: Optional[Palette] = None) -> str:
+    """对话框底色的 QSS 值。
+
+    半透明模式下仍保留接近不透明的表面色：Mica 只在边缘透出一点点，
+    这样无论壁纸是纯黑还是浅色，对话框里的文字对比度都是稳定的。
+    """
+    pal = palette or current()
+    return _rgba(pal.surface, 0.96 if pal.translucent else 1.0)
+
+
 # --------------------------------------------------------------------------
 # 系统背板（Mica / 亚克力）：半透明窗口的基础
 # --------------------------------------------------------------------------

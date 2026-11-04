@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QGuiApplication
 from PyQt5.QtWidgets import QApplication
 
 import diagnostics
@@ -33,8 +34,15 @@ def main() -> int:
     else:
         log_path = diagnostics.setup(logging.INFO)
 
+    # 高 DPI：清单已声明 PerMonitorV2，这里用 1.25/1.5 这类小数缩放因子原样渲染，
+    # 避免 Qt 把它四舍五入到 2.0 后再被 Windows 二次拉伸（文字发虚的老问题）。
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    try:
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except AttributeError:      # Qt < 5.14 没有这个接口，忽略
+        pass
     app = QApplication(sys.argv)
     app.setApplicationName("PotSync")
     app.setOrganizationName("PotSync")
@@ -48,6 +56,15 @@ def main() -> int:
     from main_window import MainWindow
     window = MainWindow()
     window.show()
+    try:
+        scr = app.primaryScreen()
+        logging.getLogger("potsync.app").info(
+            "显示环境：dpr=%.2f 逻辑DPI=%.0f 物理DPI=%.0f 逻辑分辨率=%dx%d 缩放=%.1f%%",
+            scr.devicePixelRatio(), scr.logicalDotsPerInch(), scr.physicalDotsPerInch(),
+            scr.availableGeometry().width(), scr.availableGeometry().height(),
+            scr.devicePixelRatio() * 100.0)
+    except Exception:
+        pass
     return app.exec_()
 
 

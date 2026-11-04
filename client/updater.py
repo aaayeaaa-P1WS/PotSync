@@ -197,35 +197,81 @@ def download_update(info: UpdateInfo, dst: Path,
     return dst
 
 
-def make_update_bat(current_exe: Path, new_exe: Path) -> Path:
-    """生成"退出后替换并重启"的批处理，返回路径。"""
-    bat = f"""@echo off
-rem PotSync 自更新：等待旧进程退出 → 替换 exe → 重启
-set OLD={current_exe}
-set NEW={new_exe}
-:wait
-tasklist /FI "IMAGENAME eq {current_exe.name}" | findstr /I "{current_exe.name}" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto wait
-)
-move /y "%NEW%" "%OLD%" >nul
-rem 等待杀毒软件/索引服务对新文件扫描就绪，降低重启时 DLL 加载竞争
-timeout /t 2 /nobreak >nul
-start "" "%OLD%"
-del "%~f0" >nul 2>&1
-"""
-    bat_path = Path(tempfile.gettempdir()) / "potsync_update.bat"
-    bat_path.write_text(bat, encoding="gbk", errors="replace")
-    return bat_path
+UPDATE_DIR = Path.home() / ".potsync" / "updates"
 
 
-def apply_and_restart(current_exe: Path, new_exe: Path) -> None:
-    """启动替换批处理（调用方随后应立即退出本程序）。"""
-    bat = make_update_bat(current_exe, new_exe)
-    subprocess.Popen(["cmd", "/c", str(bat)],
-                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                     close_fds=True)
+def update_log_path() -> Path:
+    log_dir = Path.home() / ".potsync" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / "update.log"
+
+
+def updates_dir() -> Path:
+    """下载的安装包长期保留在这里，替换失败时还能手动运行。"""
+    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+    return UPDATE_DIR
+
+
+def _resource(name: str) -> Path:
+    """在源码运行与 PyInstaller onefile 两种布局下找 resources 文件。"""
+    here = Path(__file__).resolve().parent
+    candidates = [here / "resources" / name]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        base = Path(meipass)
+        candidates += [base / "resources" / name,
+                       base / "client" / "resources" / name]
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"缺少更新脚本模板：{name}")
+
+
+def _ps_escape(value: object) -> str:
+    """PowerShell 单引号字符串内部转义（单引号翻倍）。"""
+    return str(value).replace("'", "''")
+
+
+def make_update_script(current_exe: Path, new_exe: Path,
+                       old_pid: Optional[int] = None) -> Path:
+    """渲染"退出后替换并重启"的 PowerShell 脚本，返回脚本路径。
+
+    这里修的正是更新后"缺 DLL / 起不来"那类问题：
+
+    * 只等**本进程 PID** 退出（旧实现按镜像名等，多开或改名会误判，
+      文件还占着就去 move）；
+    * 先复制成同目录的 `*.new` 再顶替，复制失败时原程序完好无损；
+    * 安装包只复制不搬走，替换/启动失败还能手动运行；
+    * `Start-Process -WorkingDirectory` 指到程序目录（旧实现从 bat 的
+      工作目录启动，相对路径资源会找不到）；
+    * 启动后观察 8 秒，秒退则重试两次并把原因写进 `logs/update.log`，
+      仍失败则弹原生消息框告知"包还在哪、怎么手动跑"。
+    """
+    template = _resource("update.ps1").read_text(encoding="utf-8")
+    body = (template
+            .replace("@@OLD_EXE@@", _ps_escape(current_exe))
+            .replace("@@NEW_EXE@@", _ps_escape(new_exe))
+            .replace("@@OLD_PID@@", str(int(old_pid or 0)))
+            .replace("@@LOG_PATH@@", _ps_escape(update_log_path())))
+    script_path = Path(tempfile.gettempdir()) / "potsync_update.ps1"
+    # PowerShell 5.1 按 BOM 判断 UTF-8；没有 BOM 中文会变乱码
+    script_path.write_text(body, encoding="utf-8-sig")
+    return script_path
+
+
+def apply_and_restart(current_exe: Path, new_exe: Path,
+                      old_pid: Optional[int] = None) -> None:
+    """启动更新脚本（调用方随后应立即退出本程序）。"""
+    script = make_update_script(current_exe, new_exe, old_pid)
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-WindowStyle", "Hidden", "-File", str(script)],
+        creationflags=flags, close_fds=True, cwd=str(script.parent),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 if __name__ == "__main__":

@@ -96,6 +96,14 @@ def main() -> int:
     assert pal.accent == theme.fit_accent("#8764B8", "dark")
     print(f"PASS  强调色跟随（多色图标生成，当前 {pal.accent}）")
 
+    # 设置页：冗余说明收进 ⓘ，按钮有边框；更新说明可滚动
+    tips = w.settings_page.findChildren(type(w.btnUpdate), "infoBtn")
+    assert len(tips) >= 3, len(tips)
+    assert all(t.toolTip() for t in tips), "ⓘ 必须有悬浮说明"
+    assert w.btnUpdate.objectName() == "outlineBtn"
+    assert w.lblUpdateHint.text() == ""
+    print(f"PASS  设置页精简（{len(tips)} 个 ⓘ 提示 / 检查更新按钮有边框）")
+
     # 半透明配色：开启时底色是 rgba，关闭时退回不透明 hex
     glass = theme.build_palette("dark", "#8764B8", translucent=True)
     solid = theme.build_palette("dark", "#8764B8", translucent=False)

@@ -247,20 +247,31 @@ def main() -> int:
         srv.shutdown()
         srv.server_close()
 
-    # ---------- 自更新批处理 ----------
-    bat_path = updater.make_update_bat(Path(r"C:\app\PotSync.exe"),
-                                       Path(r"C:\app\PotSync-new.exe"))
+    # ---------- 自更新脚本 ----------
+    script = updater.make_update_script(
+        Path("C:/app/O'Brien/PotSync.exe"),
+        Path("C:/app/O'Brien/PotSync-2.2.1.exe"),
+        old_pid=4242)
     try:
-        bat = bat_path.read_text(encoding="gbk")
-        assert 'tasklist /FI "IMAGENAME eq PotSync.exe"' in bat   # 等待旧进程退出
-        assert 'move /y "%NEW%" "%OLD%"' in bat                    # 替换 exe
-        assert 'start "" "%OLD%"' in bat                           # 重启
-        assert 'del "%~f0"' in bat                                 # 自删除
-        assert r"C:\app\PotSync.exe" in bat
-        assert r"C:\app\PotSync-new.exe" in bat
+        body = script.read_text(encoding="utf-8-sig")
+        assert "@@" not in body, "占位符必须全部替换"
+        assert "O''Brien" in body, "PowerShell 单引号需转义"
+        assert "WaitForExit(60000)" in body, "按 PID 等旧进程退出"
+        assert "$oldPid = 4242" in body
+        assert "Copy-Item -LiteralPath $new -Destination $tmp -Force" in body
+        assert '$bak = "$old.bak"' in body, "先改名留底再顶替"
+        assert "Move-Item -LiteralPath $bak -Destination $old -Force" in body, "失败要回滚"
+        assert "-WorkingDirectory $dir" in body, "启动时指定工作目录"
+        assert "Start-Sleep -Seconds 8" in body, "启动后观察稳定性"
+        assert "MessageBox" in body, "失败要有可见提示"
+        assert script.read_bytes().startswith(bytes([0xEF, 0xBB, 0xBF])), "PS 5.1 需要 BOM"
     finally:
-        bat_path.unlink(missing_ok=True)
-    print("PASS  make_update_bat（等待退出→替换→重启→自删除）")
+        script.unlink(missing_ok=True)
+    print("PASS  make_update_script（PID 等待 / 复制→改名顶替→回滚 / 工作目录 / 稳定性观察 / 失败提示）")
+
+    assert updater.update_log_path().name == "update.log"
+    assert updater.updates_dir().name == "updates"
+    print("PASS  更新日志与安装包目录约定")
 
     print("\n全部通过 ✔")
     return 0

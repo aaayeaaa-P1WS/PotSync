@@ -246,6 +246,23 @@ QPushButton#smallBtn {
     font-size: 12.5px;
 }
 
+QPushButton#infoBtn {
+    background: transparent;
+    border: 1px solid $border;
+    border-radius: 9px;
+    color: $text_dim;
+    font-family: "Segoe UI", "Microsoft YaHei UI";
+    font-size: 11px;
+    font-weight: 600;
+    padding: 0;
+}
+
+QPushButton#infoBtn:hover {
+    background: $surface_hover;
+    border-color: $border_strong;
+    color: $text;
+}
+
 QPushButton#outlineBtn {
     background: transparent;
     border: 1px solid $border;

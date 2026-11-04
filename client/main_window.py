@@ -219,27 +219,67 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "检查更新",
                                         f"当前已是最新版本（v{APP_VERSION}）。")
             return
-        # 发现新版本
+        # 发现新版本：用可滚动的更新说明对话框，完整展示最近几个版本的改动
         self.lblUpdateHint.setText(f"发现新版本 v{info.version.lstrip('vV')}")
-        notes = (info.notes or "").strip()[:500]
-        ver = info.version.lstrip("vV")
-        text = f"发现新版本 v{ver}（当前 v{APP_VERSION}）。"
-        if notes:
-            text += f"\n\n更新说明：\n{notes}"
-        text += "\n\n是否下载并更新？（下载完成后重启软件生效）"
-        if QMessageBox.question(self, "发现新版本", text,
-                                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+        if silent:
+            self.status.showMessage(
+                f"发现新版本 v{info.version.lstrip('vV')}，可在「设置 → 关于」中更新", 8000)
+            return
+        if not self._ask_update(info):
             return
         self._download_and_apply(info)
+
+    def _ask_update(self, info: "updater.UpdateInfo") -> bool:
+        """展示「更新内容」并询问是否更新；返回用户是否确认。"""
+        from PyQt5.QtWidgets import (QDialog, QDialogButtonBox, QLabel,
+                                     QTextBrowser, QVBoxLayout)
+        ver = info.version.lstrip("vV")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("发现新版本")
+        dlg.setMinimumWidth(520)
+        box = QVBoxLayout(dlg)
+        box.setContentsMargins(22, 20, 22, 16)
+        box.setSpacing(10)
+
+        head = QLabel(f"PotSync v{ver}")
+        head.setObjectName("sectionTitle")
+        box.addWidget(head)
+        sub = QLabel(f"当前版本 v{APP_VERSION}")
+        sub.setObjectName("tip")
+        box.addWidget(sub)
+
+        view = QTextBrowser(dlg)
+        view.setOpenExternalLinks(True)
+        view.setMinimumHeight(300)
+        notes = (info.notes or "").strip()
+        if notes:
+            try:
+                view.document().setMarkdown(notes)
+            except AttributeError:          # Qt < 5.14
+                view.setPlainText(notes)
+        else:
+            view.setPlainText("（该版本没有提供更新说明）")
+        box.addWidget(view, 1)
+
+        buttons = QDialogButtonBox(dlg)
+        later = buttons.addButton("稍后", QDialogButtonBox.RejectRole)
+        now = buttons.addButton("下载并更新", QDialogButtonBox.AcceptRole)
+        now.setObjectName("primaryBtn")
+        later.setObjectName("outlineBtn")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        box.addWidget(buttons)
+        return dlg.exec_() == QDialog.Accepted
 
     def _download_and_apply(self, info: "updater.UpdateInfo") -> None:
         import threading
         # 临时文件名带版本号：避免续传拼接到旧版本残留的临时文件（会损坏新包）
         safe_ver = "".join(c if (c.isalnum() or c in ".-") else "_"
                            for c in info.version)
-        new_exe = Path(sys.executable).with_name(f"PotSync-{safe_ver}.exe") \
-            if getattr(sys, "frozen", False) \
-            else Path.home() / ".potsync" / f"PotSync-{safe_ver}.exe"
+        # 固定落在 ~/.potsync/updates/：即便替换失败，安装包也还在，可手动运行
+        new_exe = updater.updates_dir() / f"PotSync-{safe_ver}.exe"
+        if new_exe.exists() and new_exe.stat().st_size > 1_000_000:
+            new_exe.unlink()        # 上一轮残留，重新下载避免拼接到坏文件
         self.status.showMessage("正在下载新版本…", 10000)
         self.btnUpdate.setEnabled(False)
 
@@ -262,10 +302,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "下载更新", f"下载失败：\n{error}")
             return
         if getattr(sys, "frozen", False):
+            hint = ("更新时会自动退出并重启；如果重启失败，安装包仍保留在：\n"
+                    f"{Path(new_exe).parent}\n可随时手动运行它。")
             if QMessageBox.question(
                     self, "下载完成",
-                    "新版本已下载完成，现在重启并更新？") == QMessageBox.Yes:
-                updater.apply_and_restart(Path(sys.executable), Path(new_exe))
+                    f"新版本已下载完成，现在重启并更新？\n\n{hint}") == QMessageBox.Yes:
+                import os
+                updater.apply_and_restart(Path(sys.executable), Path(new_exe),
+                                          old_pid=os.getpid())
                 QApplication.instance().quit()
         else:
             QMessageBox.information(self, "下载完成",
@@ -321,7 +365,8 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget(content)
         self.stack.addWidget(self._build_home())        # 0 主页
         self.stack.addWidget(self._build_room())        # 1 房间
-        self.stack.addWidget(self._build_settings())    # 2 设置
+        self.settings_page = self._build_settings()
+        self.stack.addWidget(self.settings_page)       # 2 设置
         self.stack.currentChanged.connect(lambda _i: self._update_nav())
         content_layout.addWidget(self.stack, 1)
         layout.addWidget(content, 1)
@@ -395,14 +440,13 @@ class MainWindow(QMainWindow):
         self._apply_window_icon(pal)
         label = getattr(self, "lblThemeMode", None)
         if label is not None:
-            label.setText(f"当前：跟随系统 · {'深色' if pal.mode == 'dark' else '浅色'}")
+            label.setText(f"跟随系统 · {'深色' if pal.mode == 'dark' else '浅色'}")
         accent_label = getattr(self, "lblAccent", None)
         if accent_label is not None:
-            accent_label.setText(f"强调色：跟随系统 · {pal.accent.upper()}")
+            accent_label.setText(f"跟随系统 · {pal.accent.upper()}")
         glass_label = getattr(self, "lblTranslucent", None)
         if glass_label is not None:
-            glass_label.setText("半透明：跟随系统 · "
-                                + ("已启用（Mica/Acrylic）" if pal.translucent else "已关闭"))
+            glass_label.setText("已启用（Mica）" if pal.translucent else "已关闭")
         if getattr(self, "_members", None):
             self._on_members(self._members)
         self.update()

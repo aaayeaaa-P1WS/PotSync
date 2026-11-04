@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""设置页：外观（跟随系统主题）、关于、日志与诊断。"""
+"""设置页：外观 / 关于 / 日志与诊断。
+
+按 Windows 11 设置页的写法：卡片里只放「当前值 + 可操作项」，
+解释性长文案收进「ⓘ」按钮的悬停提示，不再直接铺在界面上。
+"""
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
@@ -9,38 +13,49 @@ from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
 from version import APP_NAME, APP_VERSION
 
 
-def _card(title: str, desc: str = "") -> tuple:
+def _card(title: str, spacing: int = 8) -> tuple:
     card = QFrame()
     card.setObjectName("card")
     box = QVBoxLayout(card)
     box.setContentsMargins(20, 16, 20, 18)
-    box.setSpacing(8)
+    box.setSpacing(spacing)
     lbl = QLabel(title)
     lbl.setObjectName("sectionTitle")
     box.addWidget(lbl)
-    if desc:
-        sub = QLabel(desc)
-        sub.setObjectName("tip")
-        sub.setWordWrap(True)
-        box.addWidget(sub)
     return card, box
 
 
-def _kv(key: str, value: str) -> QWidget:
+def _info(text: str) -> QPushButton:
+    """圈 i 按钮：说明放进 tooltip，界面上只留一个图标。"""
+    btn = QPushButton("i")
+    btn.setObjectName("infoBtn")
+    btn.setFixedSize(18, 18)
+    btn.setCursor(Qt.WhatsThisCursor)
+    btn.setToolTip(text)
+    btn.setFocusPolicy(Qt.NoFocus)
+    return btn
+
+
+def _row(key: str, value: QLabel, info: str = "") -> QWidget:
     holder = QWidget()
     h = QHBoxLayout(holder)
     h.setContentsMargins(0, 0, 0, 0)
-    h.setSpacing(12)
+    h.setSpacing(8)
     k = QLabel(key)
     k.setObjectName("fieldLabel")
-    k.setFixedWidth(72)
-    val = QLabel(value)
-    val.setObjectName("statusLine")
-    val.setWordWrap(True)
-    val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    k.setFixedWidth(64)
+    value.setObjectName("statusLine")
+    value.setWordWrap(True)
+    value.setTextInteractionFlags(Qt.TextSelectableByMouse)
     h.addWidget(k)
-    h.addWidget(val, 1)
+    h.addWidget(value, 1)
+    if info:
+        h.addWidget(_info(info))
     return holder
+
+
+def _kv(key: str, value: str, info: str = "") -> QWidget:
+    return _row(key, QLabel(value), info)
 
 
 def build_settings(window) -> QWidget:
@@ -54,33 +69,31 @@ def build_settings(window) -> QWidget:
     v.addWidget(title)
 
     # ---------------- 外观
-    card, box = _card("外观", "界面会跟随 Windows 的深色 / 浅色设置自动切换，"
-                             "强调色取自系统主题色。")
+    card, box = _card("外观")
     window.lblThemeMode = QLabel("当前：跟随系统")
-    window.lblThemeMode.setObjectName("statusLine")
-    box.addWidget(window.lblThemeMode)
+    box.addWidget(_row(
+        "模式", window.lblThemeMode,
+        "跟随 Windows 的深色 / 浅色设置自动切换，1.5 秒内生效，无需重启。"))
     window.lblAccent = QLabel("强调色：跟随系统")
-    window.lblAccent.setObjectName("statusLine")
-    box.addWidget(window.lblAccent)
+    box.addWidget(_row(
+        "强调色", window.lblAccent,
+        "取 Windows 主题色，用于按钮、选中项、勾选框与应用图标。\n"
+        "在「Windows 设置 → 个性化 → 颜色」里改，界面上会实时跟着变。"))
     window.lblTranslucent = QLabel("半透明：跟随系统")
-    window.lblTranslucent.setObjectName("statusLine")
-    box.addWidget(window.lblTranslucent)
-    tip = QLabel("在「Windows 设置 → 个性化 → 颜色」里切换模式或主题色，"
-                 "PotSync 会在 1.5 秒内自动适配，无需重启。"
-                 "半透明使用 Windows 11 的 Mica/Acrylic 材质；"
-                 "想强制不透明可设环境变量 POTSYNC_OPAQUE=1。")
-    tip.setObjectName("tip")
-    tip.setWordWrap(True)
-    box.addWidget(tip)
+    box.addWidget(_row(
+        "半透明", window.lblTranslucent,
+        "使用 Windows 11 的 Mica 材质；系统版本过低或远程桌面下会自动退回不透明。\n"
+        "想强制关闭半透明：设置环境变量 POTSYNC_OPAQUE=1。"))
     v.addWidget(card)
 
     # ---------------- 关于
-    card, box = _card("关于", "版本号与更新检查都在这里，主页只保留日常操作。")
-    box.addWidget(_kv("应用", f"{APP_NAME}"))
+    card, box = _card("关于")
+    box.addWidget(_kv("应用", APP_NAME))
     box.addWidget(_kv("版本", f"v{APP_VERSION}"))
-    box.addWidget(_kv("同步协议", "PotSync 2.0 · 断线自动重连 · 房间状态保留"))
+    box.addWidget(_kv("同步协议", "2.0 · 断线自动重连 · 房间状态保留"))
 
     row = QHBoxLayout()
+    row.setSpacing(10)
     window.btnUpdate = QPushButton("检查更新")
     window.btnUpdate.setObjectName("outlineBtn")
     window.btnUpdate.clicked.connect(lambda: window._check_update(silent=False))
@@ -93,13 +106,15 @@ def build_settings(window) -> QWidget:
     v.addWidget(card)
 
     # ---------------- 日志
-    card, box = _card("日志与诊断", "运行日志会追加写入本地文件，遇到问题时可发给开发者排查。")
+    card, box = _card("日志与诊断")
     from diagnostics import log_path
     try:
         path_text = str(log_path())
     except Exception:
         path_text = "~/.potsync/logs/potsync.log"
-    box.addWidget(_kv("路径", path_text))
+    box.addWidget(_kv(
+        "日志", path_text,
+        "运行日志会追加写入该文件；遇到问题时可把它发给开发者排查。"))
 
     row = QHBoxLayout()
     window.btnOpenLog = QPushButton("打开日志目录")

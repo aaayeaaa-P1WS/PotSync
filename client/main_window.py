@@ -15,6 +15,7 @@ import logging
 import re
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -148,11 +149,16 @@ class MainWindow(QMainWindow):
         self._server_before_host = ""
         self._host_port = DEFAULT_PORT
         self._try_ports: list = []
+        self.public_endpoint: Optional[PublicEndpoint] = None
+        self._tunnel_state = "off"      # off / starting / ready / failed
+        self._tunnel_msg = ""
 
         self.room_code = ""
         self._pending: Optional[tuple] = None   # ("create",) / ("join", code)
         self._seeking = False
         self._last_media_shown = None
+        self._snap: Optional[Snapshot] = None
+        self._snap_t = 0.0
         self._closing = False
         self._resuming = False
         self._members: list = []
@@ -179,6 +185,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(3000, lambda: self._check_update(silent=True))
         # 更新完成后第一次启动：把这次的变化亮一次
         QTimer.singleShot(1600, self._maybe_show_whatsnew)
+        # 进度条插值：两次采样之间按时间平滑推进，避免一秒一跳
+        self._ui_tick = QTimer(self)
+        self._ui_tick.setInterval(100)
+        self._ui_tick.timeout.connect(self._tick_slider)
+        self._ui_tick.start()
 
     # ---------- 检查更新 / 自更新 ----------
 
@@ -551,14 +562,15 @@ class MainWindow(QMainWindow):
 
     # ================= 房间进出 =================
 
-    def _ensure_connected(self, pending: tuple) -> None:
+    def _ensure_connected(self, pending: tuple,
+                          endpoint: Optional[Tuple[str, int]] = None) -> None:
         self._persist()
         if self.net.connected:
             self._pending = None
             self._do_pending(pending)
         else:
             self._pending = pending
-            host, port = self._server()
+            host, port = endpoint or self._server()
             self.status.showMessage(f"正在连接 {host}:{port} …")
             self.net.connect_to(host, port)
 
@@ -590,6 +602,7 @@ class MainWindow(QMainWindow):
                 self.editServer.setText(self._server_before_host)
             self._stop_tunnel()
             self._stop_embedded()
+        self._update_reach()
 
     def _start_embedded_then_create(self) -> None:
         base_port = self._server()[1]
@@ -621,45 +634,103 @@ class MainWindow(QMainWindow):
                                 f"无法在本机启动服务器：\n{err}")
             return
         self._host_port = port
+        lan = f"{detect_lan_ip()}:{port}"
+        self.editServer.setText(lan)
+        self._persist()
         if self.chkHost.isChecked() and self.chkTunnel.isChecked():
+            # 关键：先用本机地址把房间建起来（秒进房间），
+            # 公网入口在后台并发竞速，好了再更新邀请链接。
+            self._tunnel_state = "starting"
             self._start_tunnel(port)
         else:
-            self.editServer.setText(f"{detect_lan_ip()}:{port}")
-            self._persist()
-            self._ensure_connected(("create",))
+            self._tunnel_state = "off"
+        self._update_reach()
+        self._ensure_connected(("create",), endpoint=(detect_lan_ip(), port))
 
     def _start_tunnel(self, local_port: int) -> None:
         self._stop_tunnel()
-        self.btnCreate.setEnabled(False)
         self.tunnel = TunnelManager(
             on_ready=lambda ep: self._sigTunnelReady.emit(ep),
             on_error=lambda e: self._sigTunnelFailed.emit(e),
             on_status=lambda s: self._sigTunnelStatus.emit(s))
-        self.tunnel.start(local_port)
+        preferred = self.cfg.get("tunnel_provider") or None
+        self._log("正在后台建立公网入口（几种方式同时尝试，谁先通就用谁）…")
+        self.tunnel.start(local_port, preferred=preferred)
 
     def _on_tunnel_ready(self, ep: PublicEndpoint) -> None:
-        self.btnCreate.setEnabled(True)
-        self.editServer.setText(f"{ep.host}:{ep.port}")
-        self._persist()
-        self._log(f"公网隧道已建立（{ep.provider}）：{ep.display}")
-        self.status.showMessage("公网隧道已建立，正在创建房间…", 4000)
-        self._ensure_connected(("create",))
+        # 房间早就建好了，这里只更新公网入口与邀请链接，不重连。
+        self.public_endpoint = ep
+        self._tunnel_state = "ready"
+        self._tunnel_msg = ""
+        self.cfg["tunnel_provider"] = ep.provider
+        save_config(self.cfg)
+        self._log(f"公网入口已就绪（{ep.provider}）：{ep.display}")
+        self.status.showMessage(
+            f"公网入口已就绪（{ep.provider}），现在可邀请异地好友", 6000)
+        self._update_reach()
 
     def _on_tunnel_failed(self, msg: str) -> None:
-        self.btnCreate.setEnabled(True)
-        self.editServer.setText(f"{detect_lan_ip()}:{self._host_port}")
-        self._persist()
-        ui_message.warn(
-            self, "内网穿透失败",
-            f"无法建立公网隧道（{msg}）。\n\n"
-            f"将改用局域网地址 {self.editServer.text()} 创建房间，"
-            "仅同一网络内的好友可加入。\n如需异地联机，请检查网络后重试。")
-        self._ensure_connected(("create",))
+        self.public_endpoint = None
+        self._tunnel_state = "failed"
+        self._tunnel_msg = msg
+        self._log(f"公网入口建立失败：{msg}")
+        self.status.showMessage(
+            "公网入口未建立，本房间目前只能局域网加入（可点「重试公网」）", 8000)
+        self._update_reach()
+
+    # ---------- 公网状态展示 / 重试 ----------
+
+    def _update_reach(self) -> None:
+        lab = getattr(self, "lblReach", None)
+        btn = getattr(self, "btnRetryTunnel", None)
+        if lab is None:
+            return
+        host_mode = self.chkHost.isChecked()
+        if not host_mode:
+            lab.setText("")
+            lab.setVisible(False)
+            if btn is not None:
+                btn.setVisible(False)
+            return
+        lab.setVisible(True)
+        if not self.chkTunnel.isChecked():
+            lab.setText("公网：未开启（同一网络可加入）")
+            retry = False
+        elif self._tunnel_state == "starting":
+            lab.setText("公网：正在建立…（同一网络可先用局域网地址加入）")
+            retry = False
+        elif self._tunnel_state == "ready" and self.public_endpoint is not None:
+            ep = self.public_endpoint
+            text = f"公网：{ep.display}"
+            if ep.provider == "pinggy":
+                text += "（约 60 分钟后过期，需重建）"
+            lab.setText(text)
+            retry = True
+        elif self._tunnel_state == "failed":
+            lab.setText("公网：建立失败，当前仅局域网可加入")
+            retry = True
+        else:
+            lab.setText("公网：未建立")
+            retry = True
+        if btn is not None:
+            btn.setVisible(retry)
+
+    def _retry_tunnel(self) -> None:
+        if not (self.chkHost.isChecked() and self.chkTunnel.isChecked()):
+            self.status.showMessage("先在主页勾选「内网穿透」再重试", 4000)
+            return
+        self.public_endpoint = None
+        self._tunnel_state = "starting"
+        self._update_reach()
+        self._start_tunnel(self._host_port or DEFAULT_PORT)
 
     def _stop_tunnel(self) -> None:
         if self.tunnel is not None:
             self.tunnel.stop()
             self.tunnel = None
+        self.public_endpoint = None
+        if getattr(self, "_tunnel_state", "off") == "ready":
+            self._tunnel_state = "off"
         self.btnCreate.setEnabled(True)
 
     def _stop_embedded(self) -> None:
@@ -692,6 +763,7 @@ class MainWindow(QMainWindow):
         self._ensure_connected(("join", code))
 
     def _leave_room(self) -> None:
+        self._stop_tunnel()
         self.net.leave_room()
         self.engine.leave_room()
         self.room_code = ""
@@ -704,10 +776,19 @@ class MainWindow(QMainWindow):
     def _copy_invite_link(self) -> None:
         if not self.room_code:
             return
-        host, port = self._server()
+        if self.chkHost.isChecked() and self.public_endpoint is not None:
+            ep = self.public_endpoint
+            host, port = ep.host, ep.port
+            tip = f"公网链接（{ep.provider}）已复制，异地好友可直接加入"
+        elif self.chkHost.isChecked() and self._host_port:
+            host, port = detect_lan_ip(), self._host_port
+            tip = "公网入口还没就绪，已复制局域网链接"
+        else:
+            host, port = self._server()
+            tip = "邀请链接已复制到剪贴板"
         link = f"potsync://{host}:{port}/{self.room_code}"
         QGuiApplication.clipboard().setText(link)
-        self.status.showMessage("邀请链接已复制到剪贴板", 2500)
+        self.status.showMessage(tip, 3500)
         self._log(f"邀请链接已复制：{link}")
 
     # ================= 网络回调 =================
@@ -797,6 +878,7 @@ class MainWindow(QMainWindow):
     def _enter_room(self, room: str, state: Optional[dict], members: list) -> None:
         self.room_code = room
         self.lblRoomCode.setText(room)
+        self._update_reach()
         self._on_members(members)
         self.txtLog.clear()
         self._go_room()
@@ -836,6 +918,8 @@ class MainWindow(QMainWindow):
             else:
                 self.lblStatus.setText("状态：未检测到 PotPlayer")
             return
+        self._snap = snap
+        self._snap_t = time.monotonic()
         self.lblStatus.setText(f"状态：{STATUS_TEXT.get(snap.status, '未知')}")
         self.btnToggle.setText("⏸ 暂停" if snap.status == STATUS_RUNNING else "▶ 播放")
         media = snap.media or "（未打开文件）"
@@ -846,7 +930,8 @@ class MainWindow(QMainWindow):
         if snap.duration > 0:
             if self.slider.maximum() != snap.duration:
                 self.slider.setRange(0, snap.duration)
-            if not self._seeking:
+            if not self._seeking and snap.status != STATUS_RUNNING:
+                # 播放中交给 100ms 插值定时器推进，避免每 400ms 跳一格
                 self.slider.setValue(snap.position)
             self.lblCur.setText(fmt_time(self.slider.value() if self._seeking
                                          else snap.position))
@@ -854,6 +939,19 @@ class MainWindow(QMainWindow):
         else:
             self.lblCur.setText("00:00")
             self.lblDur.setText("00:00")
+
+    def _tick_slider(self) -> None:
+        snap = self._snap
+        if snap is None or self._seeking:
+            return
+        if self.stack.currentIndex() != 1 or snap.status != STATUS_RUNNING:
+            return
+        if snap.duration <= 0 or self.slider.maximum() != snap.duration:
+            return
+        pos = snap.position + int((time.monotonic() - self._snap_t) * 1000)
+        pos = min(max(pos, 0), snap.duration)
+        self.slider.setValue(pos)
+        self.lblCur.setText(fmt_time(pos))
 
     # ================= 进度条 =================
 

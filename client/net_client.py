@@ -107,6 +107,7 @@ class NetClient(QObject):
         self._ping_task: Optional[asyncio.Task] = None
 
         self.offset_ms = 0          # server_time ≈ local_time + offset
+        self._clock_samples = []    # [(rtt, offset, mono)]：取最优样本抑制抖动
         self.rtt_ms = -1
         self._running = False
         self._host = ""
@@ -300,6 +301,26 @@ class NetClient(QObject):
     def server_now_ms(self) -> int:
         return local_ms() + self.offset_ms
 
+    # ---------- 时钟滤波 ----------
+
+    def _clock_add(self, rtt: int, offset: int) -> None:
+        self._clock_samples.append((int(rtt), int(offset), time.monotonic()))
+        del self._clock_samples[:-24]
+
+    def _clock_offset(self) -> int:
+        now = time.monotonic()
+        fresh = [s for s in self._clock_samples if now - s[2] < 90.0]
+        if not fresh:
+            return self.offset_ms
+        return min(fresh, key=lambda s: s[0])[1]
+
+    def rtt_jitter(self) -> int:
+        """最近几次心跳的 RTT 波动（毫秒）；样本太少时返回 0。"""
+        recent = [s[0] for s in self._clock_samples[-6:]]
+        if len(recent) < 3:
+            return 0
+        return max(recent) - min(recent)
+
     # ---------- 消息收发 ----------
 
     def _call(self, coro) -> None:
@@ -368,8 +389,12 @@ class NetClient(QObject):
             try:
                 rtt = max(0, now - int(t))
                 self.rtt_ms = rtt
-                # 服务器时间 ≈ ts + 单程延迟
-                self.offset_ms = int(ts) + rtt // 2 - now
+                # 服务器时间 ≈ ts + 单程延迟。直接用最新一次样本的话，
+                # 3 秒一次的心跳抖动会原样灌进时钟，进度条就会来回跳；
+                # 这里只在 90 秒窗口里挑 RTT 最小（最可信）的样本。
+                sample = int(ts) + rtt // 2 - now
+                self._clock_add(rtt, sample)
+                self.offset_ms = self._clock_offset()
                 self.sigRtt.emit(rtt)
             except (TypeError, ValueError):
                 pass

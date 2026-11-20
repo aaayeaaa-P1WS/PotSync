@@ -521,8 +521,17 @@ class SyncEngine(QObject):
         ts = int(s.get("ts", self.server_now()))
         target = position if paused else position + max(0, self.server_now() - ts)
         target = clamp(target, 0, duration or snap.duration or target)
-        if abs(snap.position - target) > APPLY_SEEK_MIN_MS:
+        # 网络抖动会让目标值在几十到几百毫秒内摆动：给一点死区，
+        # 并且 3 秒内不重复为同一方向做 seek，避免画面反复“倒一下”。
+        jitter = self._net_jitter()
+        deadband = 250 if paused else 500
+        threshold = max(deadband, jitter * 2)
+        now = time.monotonic()
+        recent_seek = now - getattr(self, "_last_seek_at", 0.0) < 3.0
+        if abs(snap.position - target) > threshold and not recent_seek:
             if self.bridge.seek_ms(target):
+                self._last_seek_at = now
+                self._guard(2.5)
                 self.sigLog.emit(f"进度对齐 → {target / 1000:.1f}s")
         if paused and snap.status != STATUS_PAUSED:
             self.bridge.pause()
@@ -716,10 +725,12 @@ class SyncEngine(QObject):
         elif not paused and snap.playing:
             expected = clamp(position + max(0, self.server_now() - ts),
                              0, duration or snap.duration or position)
-            if abs(snap.position - expected) > DRIFT_CORRECT_MS:
+            if abs(snap.position - expected) > max(DRIFT_CORRECT_MS,
+                                                    self._net_jitter() * 2):
                 action = ("seek", expected, snap.position - expected)
         elif paused and snap.status == STATUS_PAUSED and snap.duration:
-            if abs(snap.position - position) > DRIFT_CORRECT_MS:
+            if abs(snap.position - position) > max(DRIFT_CORRECT_MS,
+                                                   self._net_jitter() * 2):
                 action = ("seek", clamp(position, 0, snap.duration),
                           snap.position - position)
 
@@ -750,6 +761,14 @@ class SyncEngine(QObject):
             return False
         self._mismatch_since = 0.0
         return True
+
+    def _net_jitter(self) -> int:
+        """网络抖动（毫秒）。抖动越大，允许的偏差也越大，避免追着噪声校准。"""
+        net = getattr(self, "net", None)
+        try:
+            return int(net.rtt_jitter()) if net is not None else 0
+        except Exception:
+            return 0
 
     # ---------- 同步状态展示 ----------
 

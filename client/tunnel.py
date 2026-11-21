@@ -37,6 +37,8 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
+
+import netdl
 from typing import Callable, Optional
 
 log = logging.getLogger("potsync.tunnel")
@@ -44,14 +46,14 @@ log = logging.getLogger("potsync.tunnel")
 BIN_DIR = Path.home() / ".potsync" / "bin"
 SSH_DIR = Path.home() / ".potsync" / "ssh"
 HEALTH_FILE = Path.home() / ".potsync" / "tunnel_health.json"
-HEALTH_TTL_S = 6 * 3600.0
+HEALTH_TTL_S = 30 * 60.0
 STARTUP_TIMEOUT = 35          # 等待隧道给出公网地址的最长秒数（单次尝试）
 PUBLIC_ENDPOINT_TIMEOUT = 120  # 实测新域名 DNS 可能超过 60 秒才生效
 RACE_STARTUP_S = 18.0         # 竞速时每种方式最多等多久拿到地址
 RACE_VERIFY_S = 14.0          # 竞速时拿到地址后最多校验多久
 RACE_TOTAL_S = 36.0
-RACE_HTTPS_GRACE = 5.0           # TCP 兜底前等 HTTPS 入口的时间上限
-RACE_HTTPS_GRACE_PENDING = 9.0   # 已拿到 HTTPS 地址、正在校验时的宽限
+RACE_HTTPS_GRACE = 3.0           # TCP 兜底前等 HTTPS 入口的时间上限
+RACE_HTTPS_GRACE_PENDING = 6.0   # 已拿到 HTTPS 地址、正在校验时的宽限
 
 CLOUDFLARED_URL = ("https://github.com/cloudflare/cloudflared/releases/"
                    "latest/download/cloudflared-windows-amd64.exe")
@@ -106,6 +108,29 @@ class PublicEndpoint:
         return f"PublicEndpoint({self.host}:{self.port} via {self.provider})"
 
 
+BUNDLED_NAMES = {"cloudflared": "cloudflared.exe", "bore": "bore.exe"}
+
+
+def _bundled_bin(name: str) -> Optional[Path]:
+    """打包进主程序的隧道组件（PyInstaller 解包到 _MEIPASS/bin）。"""
+    exe = BUNDLED_NAMES.get(name)
+    if not exe:
+        return None
+    import sys
+    bases = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bases.append(Path(meipass) / "bin")
+    here = Path(__file__).resolve().parent
+    bases.append(here / "bin")
+    bases.append(here / "resources" / "bin")
+    for base in bases:
+        candidate = base / exe
+        if candidate.exists():
+            return candidate
+    return None
+
+
 class TunnelProvider:
     """一种隧道方式：二进制获取 + 启动命令 + 输出解析。"""
 
@@ -117,6 +142,9 @@ class TunnelProvider:
         raise NotImplementedError
 
     def ensure_binary(self, status: Callable[[str], None]) -> Path:
+        bundled = _bundled_bin(self.name)
+        if bundled is not None:
+            return bundled
         exe = self.binary()
         if exe.exists():
             return exe
@@ -280,67 +308,13 @@ GH_MIRRORS = ["", "https://ghfast.top/", "https://gh-proxy.com/",
 
 
 def _candidate_urls(url: str) -> list:
-    if "github.com" not in url:
-        return [url]
-    return [m + url for m in GH_MIRRORS]
+    return netdl.candidate_urls(url)
 
 
 def _download_file(url: str, dst: Path,
                    status: Optional[Callable[[str], None]] = None,
                    expected_min: int = 100_000) -> None:
-    """断点续传 + 多镜像轮询的健壮下载（直连 GitHub 不稳定时自动切换镜像）。"""
-    candidates = _candidate_urls(url)
-    pos = dst.stat().st_size if dst.exists() else 0
-    start = time.time()
-    attempt = 0
-    while True:
-        candidate = candidates[attempt % len(candidates)]
-        attempt += 1
-        if time.time() - start > 600:
-            raise RuntimeError("下载超时（10 分钟）")
-        try:
-            headers = {"User-Agent": "PotSync/1.0"}
-            if pos:
-                headers["Range"] = f"bytes={pos}-"
-            req = urllib.request.Request(candidate, headers=headers)
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                if pos and getattr(resp, "status", 200) == 200:
-                    pos = 0          # 该源不支持断点续传，重新下载
-                    mode = "wb"
-                else:
-                    mode = "ab"
-                with open(dst, mode) as f:
-                    while True:
-                        chunk = resp.read(65536)
-                        if not chunk:
-                                break
-                        f.write(chunk)
-                        pos += len(chunk)
-                        if status:
-                            status(f"正在下载（{pos / 1048576:.0f}MB）…")
-            if pos >= expected_min:
-                return
-            raise RuntimeError(f"下载文件过小（{pos}B），疑似镜像异常")
-        except urllib.error.HTTPError as exc:
-            if exc.code == 416 and pos:
-                # 续传起点超出远端文件大小（多为旧版本残留的临时文件）：
-                # 丢弃本地残留，从头重新下载
-                log.debug("续传位置无效(416 @%dB)，重新完整下载", pos)
-                pos = 0
-                dst.unlink(missing_ok=True)
-                if status:
-                    status("检测到残留文件异常，重新下载…")
-                time.sleep(1)
-                continue
-            log.debug("下载中断(%s @%dB): %s", candidate, pos, exc)
-            if status:
-                status("下载中断，切换镜像源续传…")
-            time.sleep(1)
-        except Exception as exc:
-            log.debug("下载中断(%s @%dB): %s", candidate, pos, exc)
-            if status:
-                status("下载中断，切换镜像源续传…")
-            time.sleep(1)
+    netdl.fetch(url, dst, status=status, expected_min=expected_min)
 
 
 class TunnelManager:
@@ -362,6 +336,9 @@ class TunnelManager:
         self.endpoint: Optional[PublicEndpoint] = None
         self._proc: Optional[subprocess.Popen] = None
         self._winner_proc: Optional[subprocess.Popen] = None
+        self._local_port = 0
+        self._preferred: Optional[str] = None
+        self._watching = False
         self._live: dict = {}
         self._errors: list = []
         self._thread: Optional[threading.Thread] = None
@@ -383,10 +360,16 @@ class TunnelManager:
         self._stopped.clear()
         self.endpoint = None
         self._errors = []
+        self._local_port = local_port
+        self._preferred = preferred
         self._thread = threading.Thread(
             target=self._run, args=(local_port, preferred),
             name="potsync-tunnel", daemon=True)
         self._thread.start()
+        if not self._watching:
+            self._watching = True
+            threading.Thread(target=self._watch, args=(local_port,),
+                             name="potsync-tunnel-watch", daemon=True).start()
 
     def stop(self) -> None:
         self._stopped.set()
@@ -401,11 +384,49 @@ class TunnelManager:
 
     # ---------- 内部 ----------
 
+    def _watch(self, local_port: int) -> None:
+        """公网通道进程掉线时自动重建（pinggy 60 分钟过期、网络切换等）。"""
+        import time as _time
+        down_since = 0.0
+        while not self._stopped.is_set():
+            _time.sleep(3.0)
+            if self._stopped.is_set():
+                return
+            if self.endpoint is None:
+                down_since = 0.0
+                continue
+            proc = self._winner_proc
+            alive = proc is not None and proc.poll() is None
+            if alive:
+                down_since = 0.0
+                continue
+            now = _time.monotonic()
+            if down_since == 0.0:
+                down_since = now
+                log.warning("公网通道已断开，准备重建")
+                self._on_status("公网通道已断开，正在重建…")
+                continue
+            if now - down_since < 2.0:
+                continue
+            if self._thread is not None and self._thread.is_alive():
+                continue
+            log.info("重建公网通道（local_port=%s）", local_port)
+            self.endpoint = None
+            self._winner_proc = None
+            self._thread = threading.Thread(
+                target=self._run, args=(local_port, self._preferred),
+                name="potsync-tunnel", daemon=True)
+            self._thread.start()
+            down_since = 0.0
+
     def _providers_for(self, preferred: Optional[str]) -> list:
         health = _load_health()
         now = time.time()
-        items = [p for p in PROVIDERS
-                 if now - float(health.get(p.name, 0)) > HEALTH_TTL_S]
+        items = []
+        for p in PROVIDERS:
+            ts = float(health.get(p.name, 0) or 0)
+            if ts > now + 60 or now - ts > HEALTH_TTL_S:
+                items.append(p)
         if not items:
             items = list(PROVIDERS)
         if preferred:

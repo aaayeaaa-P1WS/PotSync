@@ -10,6 +10,9 @@
 
 > 📦 下载地址：[GitHub Releases 最新版](https://github.com/aaayeaaa-P1WS/PotSync/releases/latest)（软件内可一键检查更新）
 
+- **v2.4.0 免下载依赖 + 更新修好 + 通道自愈**：`cloudflared` 与 `bore` 直接打进
+  exe（首次建房不再等几十兆下载），更新下载改走国内加速镜像并支持换源续传
+  （实测 34MB 约 25 秒），隧道中途断开或过期会自动重建并刷新邀请链接
 - **v2.3.0 公网连接重做**：创建房间不再等隧道——本机先建房进房间，公网地址在
   后台并发建立（Cloudflare / pinggy / bore 三种通道竞速，谁先通就用谁，被墙
   自动换下一种）；房间页显示公网状态并提供「重试公网」；加入后进度条只做小幅
@@ -86,7 +89,7 @@ potplayer-sync/
 │       ├── style.qss       # 界面样式模板（占位符由 theme.py 按主题填充）
 │       └── potsync.ico     # 多尺寸 exe 图标（tools/make_icon.py 生成）
 ├── server/server.py       # VPS 独立部署入口（relay.py 的薄壳）
-├── tests/                 # 十三组自动化测试（协议/重连/播放器重绑/控制桥/端到端/内嵌/
+├── tests/                 # 十四组自动化测试（协议/重连/播放器重绑/控制桥/端到端/内嵌/
 │                          #   隧道/在线链路/GUI/防火墙/更新/匹配/媒体安全）
 ├── tools/
 │   ├── fake_potplayer.py      # 假 PotPlayer 窗口（无真机时的联调用）
@@ -263,7 +266,7 @@ python tests\test_online.py        :: 公网与平滑：三通道竞速取舍、
 python tools\live_tunnel_check.py  :: 真实公网隧道联调（需联网，约 1–3 分钟）
 ```
 
-十三组离线测试共 106 项全部通过（test_online 覆盖三通道竞速、被墙回落、时钟
+十四组离线测试共 110 项全部通过（test_online 覆盖三通道竞速、被墙回落、时钟
 滤波与 seek 死区/节流；GUI 组补导航、强调色、半透明配色、设置页 ⓘ 与更新内容
 窗口断言；updater 组补自更新脚本的占位符替换、PID 等待、改名顶替与回滚断言）。
 真实网络下还验证了程序界面创建公网房间、另一客户端经默认代理路径加入并接收
@@ -271,9 +274,11 @@ python tools\live_tunnel_check.py  :: 真实公网隧道联调（需联网，约
 
 ## 九、常见问题
 
-- **隧道组件下载慢/失败**：组件托管在 GitHub，程序内置断点续传与多个镜像源
-  自动切换；如长期失败，可手动下载 cloudflared-windows-amd64.exe 放入
-  `C:\Users\<你>\.potsync\bin\cloudflared.exe`。
+- **还需要下载隧道组件吗**：不需要。`cloudflared` 与 `bore` 已随程序打包
+  （v2.4.0 起），只有 `pinggy` 复用系统自带的 `ssh.exe`。若你手工放了新版到
+  `C:\Users\<你>\.potsync\bin\`，程序仍会优先用内置那一份。
+- **更新下载很慢**：v2.4.0 起改走国内加速镜像并支持换源续传，实测 34MB 约
+  25 秒；仍失败时可在「设置 → 关于」看提示，或手动到 Releases 下载覆盖。
 - **更新后启动报 "Failed to extract … MSVCP140.dll / decompression return
   code -3"**：这是 v1.2.2 及更早版本的更新器缺陷——断点续传把旧版本残留的
   临时文件拼进了新包，且当时未做完整性校验。v1.2.3 已修复（强制 SHA-256

@@ -29,6 +29,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+import netdl
 from tunnel import _download_file
 from version import APP_NAME, APP_VERSION
 
@@ -71,12 +72,17 @@ def is_newer(latest: str, current: str = APP_VERSION) -> bool:
 
 
 def _http_json(url: str) -> dict:
+    """读 JSON。先走 urllib（快），被 RST 时改走 curl（HTTP/2 更抗干扰）。"""
     req = urllib.request.Request(url, headers={
         "User-Agent": f"{APP_NAME}/{APP_VERSION}",
         "Accept": "application/vnd.github+json",
     })
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        log.debug("urllib 读取失败(%s)，改用 curl: %s", url, exc)
+        return json.loads(netdl.fetch_text(url, timeout=REQUEST_TIMEOUT))
 
 
 def _parse_version_json(data: dict) -> UpdateInfo:
@@ -129,18 +135,8 @@ def check_for_update(cfg: dict) -> Optional[UpdateInfo]:
 
 
 def _http_text(url: str) -> str:
-    """下载小文本文件（校验和等）；github.com 地址自动尝试镜像。"""
-    from tunnel import _candidate_urls
-    last: Optional[Exception] = None
-    for candidate in _candidate_urls(url):
-        try:
-            req = urllib.request.Request(
-                candidate, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return resp.read().decode("utf-8", errors="replace")
-        except Exception as exc:            # 换下一个镜像
-            last = exc
-    raise RuntimeError(f"校验和下载失败: {last}")
+    """小文件文本读取（校验和 / version.json）：curl 优先，镜像兜底。"""
+    return netdl.fetch_text(url, timeout=REQUEST_TIMEOUT)
 
 
 def _parse_sha256_text(text: str) -> str:

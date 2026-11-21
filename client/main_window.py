@@ -492,8 +492,7 @@ class MainWindow(QMainWindow):
         self._sigServerStarted.connect(self._on_server_started)
         self._sigTunnelReady.connect(self._on_tunnel_ready)
         self._sigTunnelFailed.connect(self._on_tunnel_failed)
-        self._sigTunnelStatus.connect(
-            lambda m: self.status.showMessage(m, 8000))
+        self._sigTunnelStatus.connect(self._on_tunnel_status)
         self._sigFirewall.connect(self._on_firewall_done)
         self._sigUpdateResult.connect(self._on_update_result)
         self._sigUpdateReady.connect(self._on_update_ready)
@@ -656,6 +655,17 @@ class MainWindow(QMainWindow):
         preferred = self.cfg.get("tunnel_provider") or None
         self._log("正在后台建立公网入口（几种方式同时尝试，谁先通就用谁）…")
         self.tunnel.start(local_port, preferred=preferred)
+
+    def _on_tunnel_status(self, msg: str) -> None:
+        self.status.showMessage(msg, 8000)
+        if "已断开" in msg:
+            # 通道掉了：先把旧地址撤下来，避免好友点进失效链接；
+            # TunnelManager 会在后台自动重建，成功后再刷新。
+            self.public_endpoint = None
+            self._tunnel_state = "starting"
+            self._tunnel_msg = msg
+            self._log(msg)
+            self._update_reach()
 
     def _on_tunnel_ready(self, ep: PublicEndpoint) -> None:
         # 房间早就建好了，这里只更新公网入口与邀请链接，不重连。

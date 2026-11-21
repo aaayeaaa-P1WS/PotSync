@@ -270,6 +270,72 @@ def test_seek_throttle():
         app.processEvents()
 
 
+# --------------------------------------------------------------------------- #
+# 公网入口校验：协议级探测
+# --------------------------------------------------------------------------- #
+
+def test_ws_probe_accepts_relay():
+    """真正的中继会回 pong；用本地 WS 服务模拟。"""
+    import json as _json
+    import threading
+    from websockets.sync.server import serve as ws_serve
+
+    ready = threading.Event()
+    port = {}
+
+    def handler(conn):
+        try:
+            msg = conn.recv()
+            data = _json.loads(msg)
+            if data.get("type") == "ping":
+                conn.send(_json.dumps({"type": "pong", "t": data.get("t")}))
+                conn.send(_json.dumps({"type": "pong", "ts": 1}))
+        finally:
+            pass
+
+    with ws_serve(handler, "127.0.0.1", 0) as server:
+        port["p"] = server.socket.getsockname()[1]
+        ready.set()
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            ok, err = tunnel._ws_probe("127.0.0.1", port["p"], "tcp", timeout=6)
+        finally:
+            server.shutdown()
+    assert ok is True and err == "", (ok, err)
+    print("PASS  WebSocket 探测能识别自家中继")
+
+
+def test_ws_probe_rejects_plain_http():
+    """别人的网页（普通 HTTP）应当被判为不可用。"""
+    import http.server
+    import socketserver
+    import threading
+
+    class Quiet(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"<html>not potsync</html>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = socketserver.TCPServer(("127.0.0.1", 0), Quiet)
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        ok, err = tunnel._ws_probe("127.0.0.1", port, "tcp", timeout=6)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert ok is False and err, (ok, err)
+    print("PASS  普通网页不会被误判为中继")
+
+
 def main() -> int:
     test_endpoint_kind_and_display()
     test_race_prefers_https()
@@ -279,6 +345,8 @@ def main() -> int:
     test_rtt_jitter()
     test_seek_deadband()
     test_seek_throttle()
+    test_ws_probe_accepts_relay()
+    test_ws_probe_rejects_plain_http()
     _TMP.cleanup()
     print("\n全部通过 ✔")
     return 0

@@ -280,9 +280,10 @@ class PinggyProvider(TunnelProvider):
 
     def command(self, exe: Path, local_port: int) -> list:
         return [
-            str(exe), "-p", "443",
+            str(exe), "-T", "-p", "443",
             "-i", str(self.key_path()),
             "-o", "StrictHostKeyChecking=no",
+            "-o", "LogLevel=ERROR",
             "-o", "UserKnownHostsFile=NUL",
             "-o", "BatchMode=yes",
             "-o", "ServerAliveInterval=20",
@@ -317,6 +318,51 @@ def _download_file(url: str, dst: Path,
     netdl.fetch(url, dst, status=status, expected_min=expected_min)
 
 
+def _ws_probe(host: str, port, kind: str, timeout: float = 6.0):
+    """用 WebSocket 协议探测公网入口是不是 PotSync 中继。
+
+    比「HTTP 正文里有没有 PotSync」可靠得多：别人的网页也能返回 200，
+    只有真正的中继才会对 {"type":"ping"} 回 {"type":"pong"}。
+    """
+    try:
+        from websockets.sync.client import connect as ws_connect
+    except Exception:  # websockets 太旧时退回 HTTP 标记校验
+        return False, ""
+    if kind == "https":
+        uri = f"wss://{host}/"
+    else:
+        uri = f"ws://{host}:{port}/"
+    try:
+        with ws_connect(uri, open_timeout=timeout, close_timeout=1,
+                        max_size=65536,
+                        additional_headers={"User-Agent": "PotSync/1.0"}) as ws:
+            ws.send(json.dumps({"type": "ping", "t": int(time.time() * 1000)}))
+            reply = json.loads(ws.recv(timeout=timeout))
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    if isinstance(reply, dict) and reply.get("type") == "pong":
+        return True, ""
+    return False, f"公网响应的协议不匹配（{str(reply)[:60]}）"
+
+
+def _ws_probe_bounded(host: str, port, kind: str, timeout: float):
+    """在独立线程里跑 _ws_probe，保证 DNS/握手卡住时也不会超出预算。"""
+    box = {}
+
+    def work():
+        try:
+            box["r"] = _ws_probe(host, port, kind, timeout=timeout)
+        except Exception as exc:
+            box["r"] = (False, f"{type(exc).__name__}: {exc}")
+
+    t = threading.Thread(target=work, name="potsync-ws-probe", daemon=True)
+    t.start()
+    t.join(max(0.2, timeout))
+    if t.is_alive():
+        return False, "公网探测超时（网络无响应）"
+    return box.get("r", (False, "公网探测未返回结果"))
+
+
 class TunnelManager:
     """按优先级尝试各隧道提供商，拿到公网入口后回调。
 
@@ -336,6 +382,8 @@ class TunnelManager:
         self.endpoint: Optional[PublicEndpoint] = None
         self._proc: Optional[subprocess.Popen] = None
         self._winner_proc: Optional[subprocess.Popen] = None
+        self._last_errors = ""
+
         self._local_port = 0
         self._preferred: Optional[str] = None
         self._watching = False
@@ -434,11 +482,28 @@ class TunnelManager:
         return items
 
     def _run(self, local_port: int, preferred: Optional[str] = None) -> None:
-        """所有方式同时开始；优先 HTTPS 入口，TCP 入口作兜底。"""
+        """整体竞速；首轮全部失败时换一批入口再试一次。"""
+        for attempt in (1, 2):
+            if self._stopped.is_set():
+                return
+            if self._run_once(local_port, preferred):
+                return
+            if attempt == 1:
+                log.warning("首轮公网通道全部失败，稍后重试")
+                self._on_status("首轮没有打通，正在换一个入口重试…")
+                for _ in range(5):
+                    if self._stopped.is_set():
+                        return
+                    time.sleep(0.1)
+        if not self._stopped.is_set():
+            self._on_error(getattr(self, "_last_errors", "所有隧道方式均失败"))
+
+    def _run_once(self, local_port: int, preferred: Optional[str] = None) -> bool:
+        """一轮并发竞速；返回 True 表示已成功或已停止。"""
         providers = self._providers_for(preferred)
         if not providers:
             self._on_error("没有可用的隧道方式")
-            return
+            return True
         results: "queue.Queue" = queue.Queue()
         threads = []
         https_threads = []
@@ -509,16 +574,18 @@ class TunnelManager:
                     break
         if self._stopped.is_set():
             self._cleanup_losers(None)
-            return
+            return True
         if endpoint is None:
             for t in threads:
                 t.join(timeout=0.2)
             self._cleanup_losers(None)
-            self._on_error("；".join(errors) or "所有隧道方式均失败")
-            return
+            self._last_errors = "；".join(errors) or "所有隧道方式均失败"
+            log.warning("本轮公网通道未打通：%s", self._last_errors)
+            return False
         self._cleanup_losers(endpoint.provider)
         self.endpoint = endpoint
         self._on_ready(endpoint)
+        return True
 
     def _race_one(self, provider, local_port, results) -> None:
         name = provider.name
@@ -600,6 +667,18 @@ class TunnelManager:
                 log.warning("%s 公网校验中止：%s", endpoint.host, last_error)
                 return False
             attempt += 1
+            ws_budget = max(0.4, min(4.0, deadline - time.monotonic()))
+            ws_ok, ws_err = _ws_probe_bounded(
+                endpoint.host, endpoint.port,
+                getattr(endpoint, "kind", "") or endpoint.provider,
+                timeout=ws_budget)
+            if ws_ok:
+                elapsed = time.monotonic() - started
+                log.info("%s 公网校验通过（WebSocket 握手），用时 %.1f 秒",
+                         endpoint.host, elapsed)
+                return True
+            if ws_err:
+                last_error = ws_err
             if getattr(endpoint, "kind", "") == "https" or endpoint.provider == "cloudflared":
                 route_errors = []
                 for route, direct in (("直连", True), ("系统代理", False)):

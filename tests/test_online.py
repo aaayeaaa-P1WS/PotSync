@@ -104,6 +104,8 @@ def test_race_prefers_https():
         assert ready and ready[0].provider == "slowhttps", ready
         assert not errors, errors
         assert elapsed < 8, f"竞速耗时过长：{elapsed:.1f}s"
+        assert mgr.running and mgr._winner_proc is not None, \
+            "胜出入口的进程必须记录到 _winner_proc，否则会被 watcher 误判掉线"
         print(f"PASS  TCP 先就绪时仍等 HTTPS 入口胜出（{elapsed:.2f}s）")
     finally:
         mgr.stop()
@@ -129,6 +131,8 @@ def test_race_falls_back_when_https_blocked():
             elapsed = time.monotonic() - started
         assert ready and ready[0].provider == "bore", ready
         assert elapsed < tunnel.RACE_HTTPS_GRACE + 4, f"回落偏慢：{elapsed:.1f}s"
+        assert mgr.running and mgr._winner_proc is not None, \
+            "TCP 兜底胜出后必须记录 _winner_proc，否则 watcher 会无限重建"
         print(f"PASS  HTTPS 被拦截时快速回落到 TCP 入口（{elapsed:.2f}s）")
     finally:
         mgr.stop()

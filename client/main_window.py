@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from PyQt5.QtCore import QUrl, Qt, pyqtSignal
+from PyQt5.QtCore import QTimer, QUrl, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon
 from PyQt5.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QListWidgetItem, QMainWindow,
@@ -51,6 +51,9 @@ CONFIG_DIR = Path.home() / ".potsync"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_SERVER = "127.0.0.1:8765"
 DEFAULT_PORT = 8765
+# 公网入口通过校验后，再观察一小段时间才允许复制邀请链接：
+# 隧道刚分配地址时偶有抖动，立刻复制容易发出去一条马上失效的链接。
+PUBLIC_LINK_SETTLE_S = 2.0
 
 LINK_RE = re.compile(r"^\s*potsync://([^/:\s]+)(?::(\d+))?/([A-Za-z0-9]{4,10})\s*$")
 CODE_RE = re.compile(r"^\s*([A-Za-z0-9]{4,10})\s*$")
@@ -152,6 +155,7 @@ class MainWindow(QMainWindow):
         self.public_endpoint: Optional[PublicEndpoint] = None
         self._tunnel_state = "off"      # off / starting / ready / failed
         self._tunnel_msg = ""
+        self._public_ready_at = 0.0     # 公网入口通过校验的时刻（monotonic）
 
         self.room_code = ""
         self._pending: Optional[tuple] = None   # ("create",) / ("join", code)
@@ -179,7 +183,6 @@ class MainWindow(QMainWindow):
         self.chkTunnel.setEnabled(self.chkHost.isChecked())
 
         # 首次启动：一次性申请全部防火墙网络权限
-        from PyQt5.QtCore import QTimer
         QTimer.singleShot(600, self._maybe_setup_firewall)
         # 启动后静默检查更新（仅在配置了更新源时）
         QTimer.singleShot(3000, lambda: self._check_update(silent=True))
@@ -648,6 +651,7 @@ class MainWindow(QMainWindow):
 
     def _start_tunnel(self, local_port: int) -> None:
         self._stop_tunnel()
+        self._public_ready_at = 0.0
         self.tunnel = TunnelManager(
             on_ready=lambda ep: self._sigTunnelReady.emit(ep),
             on_error=lambda e: self._sigTunnelFailed.emit(e),
@@ -664,6 +668,7 @@ class MainWindow(QMainWindow):
             self.public_endpoint = None
             self._tunnel_state = "starting"
             self._tunnel_msg = msg
+            self._public_ready_at = 0.0
             self._log(msg)
             self._update_reach()
 
@@ -672,17 +677,22 @@ class MainWindow(QMainWindow):
         self.public_endpoint = ep
         self._tunnel_state = "ready"
         self._tunnel_msg = ""
+        self._public_ready_at = time.monotonic()
         self.cfg["tunnel_provider"] = ep.provider
         save_config(self.cfg)
         self._log(f"公网入口已就绪（{ep.provider}）：{ep.display}")
         self.status.showMessage(
-            f"公网入口已就绪（{ep.provider}），现在可邀请异地好友", 6000)
+            f"公网入口已就绪（{ep.provider}），正在确认稳定性…", 4000)
         self._update_reach()
+        # 稳定窗口结束后再放开复制按钮；期间入口若再次掉线，状态会重置。
+        QTimer.singleShot(int(PUBLIC_LINK_SETTLE_S * 1000) + 50,
+                          self._update_reach)
 
     def _on_tunnel_failed(self, msg: str) -> None:
         self.public_endpoint = None
         self._tunnel_state = "failed"
         self._tunnel_msg = msg
+        self._public_ready_at = 0.0
         self._log(f"公网入口建立失败：{msg}")
         self.status.showMessage(
             "公网入口未建立，本房间目前只能局域网加入（可点「重试公网」）", 8000)
@@ -691,6 +701,7 @@ class MainWindow(QMainWindow):
     # ---------- 公网状态展示 / 重试 ----------
 
     def _update_reach(self) -> None:
+        self._update_copy_link()
         lab = getattr(self, "lblReach", None)
         btn = getattr(self, "btnRetryTunnel", None)
         if lab is None:
@@ -712,7 +723,9 @@ class MainWindow(QMainWindow):
         elif self._tunnel_state == "ready" and self.public_endpoint is not None:
             ep = self.public_endpoint
             text = f"公网：{ep.display}"
-            if ep.provider == "pinggy":
+            if not self._copy_link_ready():
+                text += "（正在确认稳定性…）"
+            elif ep.provider == "pinggy":
                 text += "（约 60 分钟后过期，需重建）"
             lab.setText(text)
             retry = True
@@ -725,12 +738,65 @@ class MainWindow(QMainWindow):
         if btn is not None:
             btn.setVisible(retry)
 
+    def _copy_link_ready(self) -> bool:
+        """公网入口是否已稳定到可以对外分享。
+
+        主机模式只允许复制公网链接：局域网地址对异地好友没有意义，
+        隧道建立期间/失败后按钮保持禁用，避免用户复制到一条无效链接。
+        """
+        if not self.room_code:
+            return False
+        if not self.chkHost.isChecked():
+            # 加入方：链接就是房主的公网入口，进房后即可复制。
+            return True
+        if not self.chkTunnel.isChecked():
+            return False
+        if self._tunnel_state != "ready" or self.public_endpoint is None:
+            return False
+        return (time.monotonic() - self._public_ready_at) >= PUBLIC_LINK_SETTLE_S
+
+    def _update_copy_link(self) -> None:
+        btn = getattr(self, "btnCopyLink", None)
+        if btn is None:
+            return
+        if not self.room_code:
+            btn.setEnabled(False)
+            btn.setToolTip("进入房间后才能复制邀请链接")
+            return
+        if not self.chkHost.isChecked():
+            btn.setEnabled(True)
+            btn.setToolTip("复制当前房间的邀请链接")
+            return
+        if not self.chkTunnel.isChecked():
+            btn.setEnabled(False)
+            btn.setToolTip("未开启内网穿透，公网邀请链接不可用")
+            return
+        if self._tunnel_state == "starting":
+            btn.setEnabled(False)
+            btn.setToolTip("公网入口正在建立，稳定后按钮会自动可用")
+            return
+        if self._tunnel_state == "failed":
+            btn.setEnabled(False)
+            btn.setToolTip("公网入口建立失败，请先点「重试公网」")
+            return
+        if self._tunnel_state != "ready" or self.public_endpoint is None:
+            btn.setEnabled(False)
+            btn.setToolTip("公网入口尚未就绪")
+            return
+        if not self._copy_link_ready():
+            btn.setEnabled(False)
+            btn.setToolTip("正在确认公网入口稳定性，稍候即可复制")
+            return
+        btn.setEnabled(True)
+        btn.setToolTip("复制公网邀请链接（异地好友可直接加入）")
+
     def _retry_tunnel(self) -> None:
         if not (self.chkHost.isChecked() and self.chkTunnel.isChecked()):
             self.status.showMessage("先在主页勾选「内网穿透」再重试", 4000)
             return
         self.public_endpoint = None
         self._tunnel_state = "starting"
+        self._public_ready_at = 0.0
         self._update_reach()
         self._start_tunnel(self._host_port or DEFAULT_PORT)
 
@@ -739,9 +805,11 @@ class MainWindow(QMainWindow):
             self.tunnel.stop()
             self.tunnel = None
         self.public_endpoint = None
+        self._public_ready_at = 0.0
         if getattr(self, "_tunnel_state", "off") == "ready":
             self._tunnel_state = "off"
         self.btnCreate.setEnabled(True)
+        self._update_reach()
 
     def _stop_embedded(self) -> None:
         if self.embedded is not None:
@@ -777,6 +845,7 @@ class MainWindow(QMainWindow):
         self.net.leave_room()
         self.engine.leave_room()
         self.room_code = ""
+        self._update_reach()
         self._go_home()
         self._set_badge("未连接", "bad")
         self._log("已离开房间")
@@ -784,15 +853,14 @@ class MainWindow(QMainWindow):
     # ================= 邀请链接 =================
 
     def _copy_invite_link(self) -> None:
-        if not self.room_code:
+        if not self._copy_link_ready():
+            hint = self.btnCopyLink.toolTip() if hasattr(self, "btnCopyLink") else ""
+            self.status.showMessage(hint or "公网入口尚未稳定，暂时无法复制邀请链接", 4000)
             return
-        if self.chkHost.isChecked() and self.public_endpoint is not None:
+        if self.chkHost.isChecked():
             ep = self.public_endpoint
             host, port = ep.host, ep.port
             tip = f"公网链接（{ep.provider}）已复制，异地好友可直接加入"
-        elif self.chkHost.isChecked() and self._host_port:
-            host, port = detect_lan_ip(), self._host_port
-            tip = "公网入口还没就绪，已复制局域网链接"
         else:
             host, port = self._server()
             tip = "邀请链接已复制到剪贴板"

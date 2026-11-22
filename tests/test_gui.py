@@ -141,7 +141,8 @@ def main() -> int:
     assert solid.tokens()["window_base"] == solid.bg
     print("PASS  半透明配色（rgba 底色 / 关闭时退回不透明）")
 
-    # 一键复制邀请链接
+    # 一键复制邀请链接（以加入方身份；主机模式需要公网入口就绪）
+    w.chkHost.setChecked(False)
     w.room_code = "AB12CD"
     w._copy_invite_link()
     clip = QGuiApplication.clipboard().text()
@@ -175,6 +176,27 @@ def main() -> int:
     # 成员列表显示自己
     assert w.listMembers.count() >= 1
     print("PASS  房间页成员列表")
+
+    # 公网未就绪时「复制邀请链接」必须禁用，且直接调用也不能复制局域网地址
+    assert not w.btnCopyLink.isEnabled(), "公网未就绪时复制按钮不应可用"
+    sentinel = "potsync://sentinel.invalid/ZZZZZZ"
+    QGuiApplication.clipboard().setText(sentinel)
+    w._copy_invite_link()
+    assert QGuiApplication.clipboard().text() == sentinel, "未就绪时不应改写剪贴板"
+    print("PASS  公网未就绪时复制按钮禁用且无局域网链接")
+
+    # 模拟公网入口通过校验并稳定：按钮放开，复制的是公网地址
+    from tunnel import PublicEndpoint
+    w.chkTunnel.setChecked(True)
+    w.public_endpoint = PublicEndpoint("demo.trycloudflare.com", 443, "cloudflared")
+    w._tunnel_state = "ready"
+    w._public_ready_at = time.monotonic() - 10
+    w._update_reach()
+    assert w.btnCopyLink.isEnabled(), w.btnCopyLink.toolTip()
+    w._copy_invite_link()
+    clip = QGuiApplication.clipboard().text()
+    assert clip == f"potsync://demo.trycloudflare.com:443/{code}", clip
+    print(f"PASS  公网稳定后复制公网链接 -> {clip}")
 
     # 收尾：断开并停止内嵌服务器
     w.net.leave_room()

@@ -66,6 +66,9 @@ def build_room(window) -> QWidget:
     window.btnCopyLink.setObjectName("outlineBtn")
     window.btnCopyLink.setMinimumHeight(32)
     window.btnCopyLink.setCursor(Qt.PointingHandCursor)
+    # 默认禁用：主机模式要等公网入口稳定后才允许复制，避免发出局域网链接。
+    window.btnCopyLink.setEnabled(False)
+    window.btnCopyLink.setToolTip("进入房间后才能复制邀请链接")
     window.btnCopyLink.clicked.connect(window._copy_invite_link)
     window.btnLeave = QPushButton("离开房间")
     window.btnLeave.setObjectName("dangerBtn")

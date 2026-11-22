@@ -429,6 +429,7 @@ class TunnelManager:
             self._terminate_process(proc)
         self._proc = None
         self._winner_proc = None
+        self.endpoint = None
 
     # ---------- 内部 ----------
 
@@ -583,6 +584,17 @@ class TunnelManager:
             log.warning("本轮公网通道未打通：%s", self._last_errors)
             return False
         self._cleanup_losers(endpoint.provider)
+        # 记住胜出的进程：_watch 靠它判断公网通道是否还活着。
+        # 以前这里忘了赋值，导致 _winner_proc 永远是 None —— 入口刚就绪 3 秒后
+        # 就被 watcher 判成“已断开”，于是无限重建、每次换一个新端口。
+        winner = self._live.get(endpoint.provider)
+        if winner is None or winner.poll() is not None:
+            self._cleanup_losers(None)
+            self._last_errors = f"{endpoint.provider} 入口进程已退出"
+            log.warning("公网入口进程在就绪前退出：%s", endpoint.display)
+            return False
+        self._winner_proc = winner
+        self._proc = winner
         self.endpoint = endpoint
         self._on_ready(endpoint)
         return True

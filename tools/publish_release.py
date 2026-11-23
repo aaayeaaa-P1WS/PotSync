@@ -31,9 +31,20 @@ DEFAULT_PROXY = "http://127.0.0.1:20890"
 
 
 def read_token() -> str:
+    """优先读 DPAPI 加密的长期凭据，其次环境变量，最后才是一次性明文文件。"""
     env = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if env:
         return env.strip()
+    blob = Path.home() / ".potsync" / "gh_token.bin"
+    if blob.exists():
+        try:
+            import win32crypt  # type: ignore
+            raw = win32crypt.CryptUnprotectData(blob.read_bytes())[1]
+            token = raw.decode("utf-8").strip()
+            if token:
+                return token
+        except Exception as exc:  # noqa: BLE001
+            print(f"（DPAPI 凭据读取失败，继续尝试其它来源：{exc}）")
     if not TOKEN_FILE.exists():
         sys.exit(f"找不到凭据：请把 PAT 写进 {TOKEN_FILE}")
     token = TOKEN_FILE.read_text(encoding="utf-8").strip()

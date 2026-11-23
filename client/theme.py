@@ -190,6 +190,9 @@ class Palette:
         data["surface_hover_a"] = _rgba(self.surface_hover, 0.82 if self.translucent else 1.0)
         data["log_bg_a"] = _rgba(self.log_bg, a_log)
         data["field_a"] = _rgba(self.surface, a_field)
+        # 中性灰底：用于「不可用」但需要一眼看出是灰的控件（如未就绪的复制按钮），
+        # 浅色下不能直接用 surface_alt（接近白色），所以单独给一层半透明灰。
+        data["mute_bg"] = _rgba(QColor("#808080"), 0.16 if self.translucent else 0.10)
         data["selected_a"] = _rgba(self.selected, 0.72 if self.translucent else 1.0)
         data["status_a"] = _rgba(self.sidebar, 0.86 if self.translucent else 1.0)
         data["border_a"] = _rgba(self.border, 0.85 if self.translucent else 1.0)

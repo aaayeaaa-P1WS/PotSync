@@ -239,7 +239,7 @@ QPushButton#copyLinkBtn:pressed {
 }
 
 QPushButton#copyLinkBtn:disabled {
-    background: $surface_alt_a;
+    background: $mute_bg;
     color: $text_muted;
     border: 1px solid $border;
     font-weight: 400;

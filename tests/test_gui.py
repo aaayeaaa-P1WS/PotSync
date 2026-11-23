@@ -121,7 +121,7 @@ def main() -> int:
 
     # 更新弹窗：内容可滚动，且按钮文案明确
     from ui.notes_dialog import NotesDialog
-    dlg = NotesDialog(w, whatsnew.recent_sections(3))
+    dlg = NotesDialog(w, whatsnew.recent_sections(8))
     dlg.show()
     app.processEvents()
     assert dlg.view.verticalScrollBar().maximum() > 0, "更新内容需要可滚动"

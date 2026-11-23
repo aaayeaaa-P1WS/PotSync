@@ -100,6 +100,24 @@ def main() -> int:
         failures.append("空端口应当判失败")
         print(f"FAIL 空端口被判成可用：{p3}")
 
+    # 4) 「端口是否已被占用」预检：有人监听才算占用，空端口不能误报
+    p4 = free_port()
+    srv4 = start_squatter(p4)
+    used = MainWindow._port_in_use(p4)
+    srv4.shutdown()
+    if used:
+        print(f"PASS 预检识别监听中的端口（{p4}）")
+    else:
+        failures.append("监听中的端口应判为占用")
+        print(f"FAIL 预检漏判监听端口：{p4}")
+
+    p5 = free_port()
+    if not MainWindow._port_in_use(p5):
+        print(f"PASS 预检放行空闲端口（{p5}）")
+    else:
+        failures.append("空闲端口不应判为占用")
+        print(f"FAIL 预检误报空闲端口：{p5}")
+
     app.processEvents()
     if failures:
         print("失败：", "；".join(failures))

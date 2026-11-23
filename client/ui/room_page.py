@@ -63,7 +63,7 @@ def build_room(window) -> QWidget:
     top.addWidget(window.btnRetryTunnel, 0, Qt.AlignBottom)
 
     window.btnCopyLink = QPushButton("复制邀请链接")
-    window.btnCopyLink.setObjectName("outlineBtn")
+    window.btnCopyLink.setObjectName("copyLinkBtn")
     window.btnCopyLink.setMinimumHeight(32)
     window.btnCopyLink.setCursor(Qt.PointingHandCursor)
     # 默认禁用：主机模式要等公网入口稳定后才允许复制，避免发出局域网链接。

@@ -218,6 +218,33 @@ QPushButton#primaryBtn:hover { border-color: $accent_soft_strong; }
 QPushButton#primaryBtn:pressed { border-color: $accent; }
 QPushButton#primaryBtn:disabled { background: $accent_soft; color: $text_muted; border-color: transparent; }
 
+/* 复制邀请链接：公网就绪时高亮，未就绪时整颗灰掉 */
+QPushButton#copyLinkBtn {
+    background: $accent;
+    color: $on_accent;
+    border: 1px solid $accent;
+    font-weight: 600;
+    padding: 6px 14px;
+}
+
+QPushButton#copyLinkBtn:hover {
+    border-color: $accent_soft_strong;
+    background: $accent_soft_strong;
+    color: $on_accent;
+}
+
+QPushButton#copyLinkBtn:pressed {
+    background: $accent;
+    border-color: $accent;
+}
+
+QPushButton#copyLinkBtn:disabled {
+    background: $surface_alt_a;
+    color: $text_muted;
+    border: 1px solid $border;
+    font-weight: 400;
+}
+
 QPushButton#dangerBtn {
     background: transparent;
     color: $danger;

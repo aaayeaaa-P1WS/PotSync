@@ -618,11 +618,23 @@ class MainWindow(QMainWindow):
                                 "本机 10 个连续端口均被占用，请在服务器栏更换端口后重试。")
             return
         port = self._try_ports.pop(0)
+        if self._port_in_use(port):
+            # 已有别的程序在这个端口上监听：直接换下一个，别去抢绑定
+            self._log(f"端口 {port} 已被其它程序占用，改用下一个端口…")
+            self._try_next_port()
+            return
         self.status.showMessage(f"正在本机启动内置服务器（端口 {port}）…", 4000)
         self.embedded = EmbeddedServer(
             "0.0.0.0", port,
             on_ready=lambda ok, err, p=port: self._sigServerStarted.emit(ok, p, err))
         self.embedded.start()
+
+    @staticmethod
+    def _port_in_use(port: int) -> bool:
+        """本机该端口上是否已有进程在监听（含只监听 127.0.0.1 的情况）。"""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.4)
+            return sock.connect_ex(("127.0.0.1", port)) == 0
 
     def _local_relay_probe(self, port: int) -> Tuple[bool, str]:
         """确认 ``127.0.0.1:port`` 真的连到我们刚起的服务器。

@@ -192,12 +192,20 @@ class Palette:
         data["field_a"] = _rgba(self.surface, a_field)
         # 中性灰底：用于「不可用」但需要一眼看出是灰的控件（如未就绪的复制按钮），
         # 浅色下不能直接用 surface_alt（接近白色），所以单独给一层半透明灰。
+        # 危险操作用实心红 + 近黑文字（Win11 的删除类强调色），两个主题都保证对比度
+        if self.mode == "light":
+            data["danger_solid"] = "#ef1b2d"
+            data["danger_solid_hover"] = "#f4323f"
+        else:
+            data["danger_solid"] = "#ff7a7a"
+            data["danger_solid_hover"] = "#ff8f8f"
+        data["on_danger"] = "#000000"
         data["mute_bg"] = _rgba(QColor("#808080"), 0.16 if self.translucent else 0.10)
         data["selected_a"] = _rgba(self.selected, 0.72 if self.translucent else 1.0)
         data["status_a"] = _rgba(self.sidebar, 0.86 if self.translucent else 1.0)
         data["border_a"] = _rgba(self.border, 0.85 if self.translucent else 1.0)
         data["radius"] = "8px"
-        data["radius_small"] = "6px"
+        data["radius_small"] = "4px"
         data["font_family"] = ('"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", '
                                '"微软雅黑", sans-serif')
         data["mono_family"] = '"Cascadia Mono", "Consolas", "Microsoft YaHei UI", monospace'

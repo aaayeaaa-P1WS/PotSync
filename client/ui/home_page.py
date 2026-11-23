@@ -20,7 +20,7 @@ def _card(title: str, desc: str = "", spacing: int = 10) -> tuple:
     card = QFrame()
     card.setObjectName("card")
     box = QVBoxLayout(card)
-    box.setContentsMargins(18, 14, 18, 16)
+    box.setContentsMargins(16, 12, 16, 16)
     box.setSpacing(spacing)
 
     head = QVBoxLayout()

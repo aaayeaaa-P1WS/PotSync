@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "client"))
 
 from PyQt5.QtWidgets import QApplication  # noqa: E402
-from PyQt5.QtGui import QGuiApplication   # noqa: E402
+from PyQt5.QtGui import QColor, QGuiApplication   # noqa: E402
 
 app = QApplication(sys.argv)
 
@@ -140,6 +140,30 @@ def main() -> int:
     assert glass.tokens()["window_base"] == "transparent"
     assert solid.tokens()["window_base"] == solid.bg
     print("PASS  半透明配色（rgba 底色 / 关闭时退回不透明）")
+
+    # Win11 规范自检：危险按钮黑字对比度 ≥4.5、控件圆角 4px、主按钮文字对比度
+    def _lum(hex_color: str) -> float:
+        c = QColor(hex_color)
+
+        def ch(v: float) -> float:
+            v /= 255.0
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * ch(c.red()) + 0.7152 * ch(c.green()) + 0.0722 * ch(c.blue())
+
+    def _ratio(fg: str, bg: str) -> float:
+        a, b = _lum(fg), _lum(bg)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+    for _mode in ("light", "dark"):
+        _pal = theme.build_palette(_mode, "#0067C0", translucent=False)
+        _tk = _pal.tokens()
+        _danger = _ratio(_tk["on_danger"], _tk["danger_solid"])
+        assert _danger >= 4.5, f"{_mode} 危险按钮对比度 {_danger:.2f}"
+        _primary = _ratio(_tk["on_accent"], _pal.accent)
+        assert _primary >= 4.5, f"{_mode} 主按钮对比度 {_primary:.2f}"
+        assert _tk["radius_small"] == "4px", _tk["radius_small"]
+    print("PASS  Win11 规范（危险按钮黑字 ≥4.5 / 主按钮 ≥4.5 / 控件圆角 4px）")
 
     # 一键复制邀请链接（以加入方身份；主机模式需要公网入口就绪）
     w.chkHost.setChecked(False)

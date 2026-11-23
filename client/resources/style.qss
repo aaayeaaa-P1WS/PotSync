@@ -167,7 +167,8 @@ QLineEdit:hover {
 }
 
 QLineEdit:focus {
-    border: 1px solid $accent;
+    border: 2px solid $accent;
+    padding: 6px 9px;
     background: $field_a;
 }
 
@@ -197,7 +198,8 @@ QPushButton:pressed {
 }
 
 QPushButton:focus {
-    border-color: $accent;
+    border: 2px solid $accent;
+    padding: 6px 15px;
 }
 
 QPushButton:disabled {
@@ -246,14 +248,34 @@ QPushButton#copyLinkBtn:disabled {
 }
 
 QPushButton#dangerBtn {
-    background: transparent;
-    color: $danger;
-    border: 1px solid $border;
+    background: $danger_solid;
+    color: $on_danger;
+    border: 1px solid $danger_solid;
+    font-weight: 600;
+    padding: 6px 14px;
 }
 
 QPushButton#dangerBtn:hover {
-    background: $danger_soft;
-    border-color: $danger;
+    background: $danger_solid_hover;
+    border-color: $danger_solid_hover;
+    color: $on_danger;
+}
+
+QPushButton#dangerBtn:pressed {
+    background: $danger_solid;
+    border-color: $danger_solid;
+}
+
+QPushButton#dangerBtn:focus {
+    border: 2px solid $on_danger;
+    padding: 5px 13px;
+}
+
+QPushButton#dangerBtn:disabled {
+    background: $mute_bg;
+    color: $text_muted;
+    border: 1px solid $border;
+    font-weight: 400;
 }
 
 QPushButton#ghostBtn, QPushButton#smallBtn {

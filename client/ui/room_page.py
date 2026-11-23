@@ -16,7 +16,7 @@ def _card(title: str, stretch: int = 0) -> tuple:
     card = QFrame()
     card.setObjectName("card")
     box = QVBoxLayout(card)
-    box.setContentsMargins(18, 14, 18, 16)
+    box.setContentsMargins(16, 12, 16, 16)
     box.setSpacing(10)
     head = QHBoxLayout()
     head.setContentsMargins(0, 0, 0, 0)
@@ -31,7 +31,7 @@ def _card(title: str, stretch: int = 0) -> tuple:
 def build_room(window) -> QWidget:
     page = QWidget()
     v = QVBoxLayout(page)
-    v.setContentsMargins(32, 24, 32, 18)
+    v.setContentsMargins(32, 20, 32, 16)
     v.setSpacing(14)
 
     # ---------------- 顶部：房间号 + 操作

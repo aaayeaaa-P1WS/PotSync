@@ -624,6 +624,32 @@ class MainWindow(QMainWindow):
             on_ready=lambda ok, err, p=port: self._sigServerStarted.emit(ok, p, err))
         self.embedded.start()
 
+    def _local_relay_probe(self, port: int) -> Tuple[bool, str]:
+        """确认 ``127.0.0.1:port`` 真的连到我们刚起的服务器。
+
+        Windows 允许另一个进程先占住 ``127.0.0.1:port``（常见于本机其它
+        Web 服务），我们再去绑定 ``0.0.0.0:port`` 仍可能成功；此时回环
+        流量会被系统优先送给那个更具体的监听者，于是公网隧道转发过去拿到
+        的是别人的响应，校验阶段会报“公网响应不是 PotSync 中继服务”。
+        这里用与隧道完全相同的路径做一次本机回环探测，把这种端口占用在
+        建房之前就识别出来。
+        """
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=2.0) as sock:
+                sock.sendall(b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                data = b""
+                while len(data) < 512:
+                    chunk = sock.recv(256)
+                    if not chunk:
+                        break
+                    data += chunk
+        except OSError as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+        if b"PotSync" in data:
+            return True, ""
+        head = data.split(b"\r\n", 1)[0].decode("latin-1", "replace")[:80]
+        return False, f"回环端口返回的不是中继服务（{head or '无响应'}）"
+
     def _on_server_started(self, ok: bool, port: int, err: str) -> None:
         if not ok:
             # 端口被占用则自动尝试下一个
@@ -634,6 +660,22 @@ class MainWindow(QMainWindow):
                 return
             ui_message.warn(self, "内置服务器启动失败",
                                 f"无法在本机启动服务器：\n{err}")
+            return
+        probe_ok, probe_err = self._local_relay_probe(port)
+        if not probe_ok:
+            self._log(f"端口 {port} 被其它程序占用（{probe_err}），尝试下一个端口…")
+            if self._try_ports:
+                try:
+                    self.embedded.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.embedded = None
+                self._try_next_port()
+                return
+            ui_message.warn(self, "端口被其它程序占用",
+                                f"本机 127.0.0.1:{port} 上跑的是别的程序，"
+                                f"导致公网入口无法指向本程序。\n\n"
+                                f"请关闭占用该端口的程序，或在服务器栏换个端口再试。")
             return
         self._host_port = port
         lan = f"{detect_lan_ip()}:{port}"

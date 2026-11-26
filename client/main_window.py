@@ -106,6 +106,43 @@ def detect_lan_ip() -> str:
         return "127.0.0.1"
 
 
+def lan_candidates() -> list:
+    """本机可能被别人访问到的 IPv4 候选（去重、排除 0.0.0.0）。"""
+    seen = []
+    try:
+        ip = detect_lan_ip()
+        if ip and ip not in seen:
+            seen.append(ip)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if ip and ip not in seen and not ip.startswith("0."):
+                seen.append(ip)
+    except OSError:
+        pass
+    for fallback in ("127.0.0.1",):
+        if fallback not in seen:
+            seen.append(fallback)
+    return seen
+
+
+def pick_lan_ip(port: int) -> str:
+    """挑一个真的能连上本机中继的地址。
+
+    多网卡 / VPN / 切换过网络时，detect_lan_ip() 可能给出别的适配器地址
+    （例如 192.168.75.x），本机连它反而不通。这里对候选逐个做一次
+    真实 TCP 连接，谁通就用谁，全都不通就退回回环。
+    """
+    for ip in lan_candidates():
+        try:
+            with socket.create_connection((ip, port), timeout=0.8):
+                return ip
+        except OSError:
+            continue
+    return "127.0.0.1"
+
+
 def load_config() -> dict:
     try:
         return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -690,8 +727,11 @@ class MainWindow(QMainWindow):
                                 f"请关闭占用该端口的程序，或在服务器栏换个端口再试。")
             return
         self._host_port = port
-        lan = f"{detect_lan_ip()}:{port}"
+        lan_ip = pick_lan_ip(port)
+        lan = f"{lan_ip}:{port}"
         self.editServer.setText(lan)
+        if lan_ip != detect_lan_ip():
+            self._log(f"局域网地址选用 {lan_ip}:{port}（默认网卡地址连不通，已自动换一个）")
         self._persist()
         if self.chkHost.isChecked() and self.chkTunnel.isChecked():
             # 关键：先用本机地址把房间建起来（秒进房间），
@@ -701,7 +741,9 @@ class MainWindow(QMainWindow):
         else:
             self._tunnel_state = "off"
         self._update_reach()
-        self._ensure_connected(("create",), endpoint=(detect_lan_ip(), port))
+        # 主机自己连回环：不依赖网卡地址是否可达，也不会被防火墙的入站规则挡住。
+        # 端口归属已经由 _local_relay_probe 确认过，不会再连到别人身上。
+        self._ensure_connected(("create",), endpoint=("127.0.0.1", port))
 
     def _start_tunnel(self, local_port: int) -> None:
         self._stop_tunnel()

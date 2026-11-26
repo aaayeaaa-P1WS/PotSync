@@ -65,6 +65,22 @@ def probe(port: int):
     return MainWindow._local_relay_probe(object(), port)
 
 
+def test_pick_lan_ip_falls_back_to_loopback():
+    """端口没人监听时，候选地址都连不通，必须退回回环而不是给死地址。"""
+    import socket
+
+    import main_window
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()                      # 端口空出来，谁都不监听
+    chosen = main_window.pick_lan_ip(port)
+    assert chosen == "127.0.0.1", f"没有监听时不应返回 {chosen}"
+    assert "127.0.0.1" in main_window.lan_candidates()
+    print("PASS  局域网地址都连不通时退回回环")
+
+
 def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     failures = []
@@ -117,6 +133,13 @@ def main() -> int:
     else:
         failures.append("空闲端口不应判为占用")
         print(f"FAIL 预检误报空闲端口：{p5}")
+
+    # 6) 局域网地址选择：没有监听时退回回环
+    try:
+        test_pick_lan_ip_falls_back_to_loopback()
+    except AssertionError as exc:
+        failures.append(f"局域网地址选择：{exc}")
+        print(f"FAIL 局域网地址选择：{exc}")
 
     app.processEvents()
     if failures:

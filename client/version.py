@@ -3,4 +3,4 @@
 """PotSync 版本信息（唯一权威来源）。"""
 
 APP_NAME = "PotSync"
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"

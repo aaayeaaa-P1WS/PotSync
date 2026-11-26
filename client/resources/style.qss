@@ -178,14 +178,19 @@ QLineEdit[readOnly="true"] {
 }
 
 /* ---------- 按钮 ---------- */
+/* Win11 / Fluent 2 的通用按钮：32px 高、4px 圆角、14px 正文、12px 左右内边距；
+   默认按钮是“低存在感”的中性样式，只有主操作才用强调色填充，危险操作用深红填充。 */
 
 QPushButton {
     background: $surface_alt_a;
     border: 1px solid $border;
     border-radius: $radius_small;
-    padding: 7px 16px;
+    padding: 0 12px;
+    min-height: 32px;
+    max-height: 32px;
+    font-size: 14px;
+    font-weight: 400;
     color: $text;
-    min-height: 18px;
 }
 
 QPushButton:hover {
@@ -199,47 +204,44 @@ QPushButton:pressed {
 
 QPushButton:focus {
     border: 2px solid $accent;
-    padding: 6px 15px;
+    padding: 0 11px;
 }
 
 QPushButton:disabled {
-    background: $surface_alt_a;
+    background: $mute_bg;
     color: $text_muted;
     border-color: $border;
 }
 
-QPushButton#primaryBtn {
-    background: $accent;
-    color: $on_accent;
-    border: 1px solid $accent;
-    font-weight: 600;
-    padding: 8px 18px;
-}
-
-QPushButton#primaryBtn:hover { border-color: $accent_soft_strong; }
-QPushButton#primaryBtn:pressed { border-color: $accent; }
-QPushButton#primaryBtn:disabled { background: $accent_soft; color: $text_muted; border-color: transparent; }
-
-/* 复制邀请链接：公网就绪时高亮，未就绪时整颗灰掉 */
+/* 主操作：实心强调色 */
+QPushButton#primaryBtn,
 QPushButton#copyLinkBtn {
     background: $accent;
     color: $on_accent;
     border: 1px solid $accent;
     font-weight: 600;
-    padding: 6px 14px;
 }
 
+QPushButton#primaryBtn:hover,
 QPushButton#copyLinkBtn:hover {
-    border-color: $accent_soft_strong;
-    background: $accent_soft_strong;
+    background: $accent_hover;
+    border-color: $accent_hover;
     color: $on_accent;
 }
 
+QPushButton#primaryBtn:pressed,
 QPushButton#copyLinkBtn:pressed {
     background: $accent;
     border-color: $accent;
 }
 
+QPushButton#primaryBtn:focus,
+QPushButton#copyLinkBtn:focus {
+    border: 2px solid $on_accent;
+    padding: 0 11px;
+}
+
+QPushButton#primaryBtn:disabled,
 QPushButton#copyLinkBtn:disabled {
     background: $mute_bg;
     color: $text_muted;
@@ -247,32 +249,12 @@ QPushButton#copyLinkBtn:disabled {
     font-weight: 400;
 }
 
-/* 房间页同一排的三个按钮：统一盒模型，保证文字基线对齐 */
-QPushButton#copyLinkBtn,
-QPushButton#dangerBtn,
-QPushButton#retryTunnelBtn {
-    min-height: 30px;
-    max-height: 30px;
-    padding: 0 14px;
-    font-size: 13px;
-    font-weight: 600;
-}
-
-QPushButton#retryTunnelBtn {
-    background: $surface_alt_a;
-    color: $text;
-    border: 1px solid $border;
-    border-radius: $radius_small;
-}
-QPushButton#retryTunnelBtn:hover {
-    background: $surface_hover_a;
-    border-color: $border_strong;
-}
-
+/* 危险操作：Fluent 2 destructive（深红底 + 白字） */
 QPushButton#dangerBtn {
     background: $danger_solid;
     color: $on_danger;
     border: 1px solid $danger_solid;
+    font-weight: 600;
 }
 
 QPushButton#dangerBtn:hover {
@@ -288,6 +270,7 @@ QPushButton#dangerBtn:pressed {
 
 QPushButton#dangerBtn:focus {
     border: 2px solid $on_danger;
+    padding: 0 11px;
 }
 
 QPushButton#dangerBtn:disabled {
@@ -297,21 +280,39 @@ QPushButton#dangerBtn:disabled {
     font-weight: 400;
 }
 
+/* 次级操作：透明底 + 描边，不加粗，避免和主行动抢视线 */
+QPushButton#outlineBtn,
+QPushButton#retryTunnelBtn {
+    background: transparent;
+    border: 1px solid $border_strong;
+    color: $text;
+    font-weight: 400;
+}
+
+QPushButton#outlineBtn:hover,
+QPushButton#retryTunnelBtn:hover {
+    background: $surface_hover_a;
+    border-color: $border_strong;
+}
+
+QPushButton#outlineBtn:pressed,
+QPushButton#retryTunnelBtn:pressed {
+    background: $selected_a;
+}
+
 QPushButton#ghostBtn, QPushButton#smallBtn {
     background: transparent;
     border: 1px solid transparent;
     color: $text_dim;
-    padding: 5px 10px;
+    min-height: 28px;
+    max-height: 28px;
+    font-size: 13px;
 }
 
 QPushButton#ghostBtn:hover, QPushButton#smallBtn:hover {
     background: $surface_hover_a;
     color: $text;
     border-color: transparent;
-}
-
-QPushButton#smallBtn {
-    font-size: 12.5px;
 }
 
 QPushButton#infoBtn {
@@ -322,6 +323,8 @@ QPushButton#infoBtn {
     font-family: "Segoe UI", "Microsoft YaHei UI";
     font-size: 11px;
     font-weight: 600;
+    min-height: 18px;
+    max-height: 18px;
     padding: 0;
 }
 
@@ -329,22 +332,6 @@ QPushButton#infoBtn:hover {
     background: $surface_hover;
     border-color: $border_strong;
     color: $text;
-}
-
-QPushButton#outlineBtn {
-    background: transparent;
-    border: 1px solid $border;
-    color: $text;
-    padding: 6px 14px;
-}
-
-QPushButton#outlineBtn:hover {
-    background: $surface_hover;
-    border-color: $border_strong;
-}
-
-QPushButton#outlineBtn:pressed {
-    background: $selected;
 }
 
 QPushButton#navBtn {

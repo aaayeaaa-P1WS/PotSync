@@ -340,6 +340,71 @@ def test_ws_probe_rejects_plain_http():
     print("PASS  普通网页不会被误判为中继")
 
 
+# --------------------------------------------------------------------------- #
+# 5. 生命周期：离开房间后不许在后台继续重建/重连（2.5.0）
+# --------------------------------------------------------------------------- #
+def test_watch_thread_stops_with_stop():
+    """stop() 之后看护线程必须退出，不再偷偷重建通道。"""
+    import threading
+
+    fast = FakeProvider("fast", "tcp", "bore.pub:41090", delay=0.0)
+    with patch.object(tunnel, "PROVIDERS", [fast]):
+        mgr, status, errors, ready = _manager()
+        calls = {"n": 0}
+        original = mgr._run
+
+        def counted(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        mgr._run = counted
+        mgr._verify_endpoint = lambda ep, timeout=None, proc=None: True
+        mgr.start(23456)
+        deadline = time.time() + 10
+        while mgr.endpoint is None and time.time() < deadline:
+            time.sleep(0.05)
+        assert mgr.endpoint is not None, "首次竞速没有拿到入口"
+
+        # 模拟「胜出的隧道进程挂了」：看护线程本来会重建
+        proc = mgr._winner_proc
+        assert proc is not None
+        proc.kill()
+
+        mgr.stop()
+        first = calls["n"]
+        time.sleep(4.5)                     # 超过看护线程 3s 的轮询周期
+        assert calls["n"] == first, "stop 之后仍在重建通道"
+        assert mgr._watch_thread is None
+        print("PASS  stop() 之后看护线程不再重建通道")
+
+
+def test_rebuild_limit_stops_runaway_retries():
+    """连续重建超过上限时停手，交给用户手动重试。"""
+    mgr, status, errors, ready = _manager()
+    mgr._gen = 3
+    mgr._local_port = 23457
+    mgr._rebuilds = tunnel.REBUILD_LIMIT
+    # 直接验证「达到上限后不再启动新一轮 _run」
+    started = []
+    mgr._thread = None
+    mgr._endpoint = None
+    mgr.endpoint = tunnel.PublicEndpoint("bore.pub", 1, "bore")
+    mgr._winner_proc = None
+    original_run = mgr._run
+    mgr._run = lambda *a, **k: started.append(1)
+    try:
+        import threading
+        t = threading.Thread(target=mgr._watch, args=(mgr._gen, 23457), daemon=True)
+        t.start()
+        t.join(8)
+        assert not t.is_alive(), "达到上限后看护线程应结束"
+        assert started == [], "达到上限后不应该再重建"
+        assert errors and "多次重建失败" in errors[-1]
+    finally:
+        mgr._run = original_run
+    print("PASS  重建达到上限后停止自动重试并报错")
+
+
 def main() -> int:
     test_endpoint_kind_and_display()
     test_race_prefers_https()
@@ -351,6 +416,8 @@ def main() -> int:
     test_seek_throttle()
     test_ws_probe_accepts_relay()
     test_ws_probe_rejects_plain_http()
+    test_watch_thread_stops_with_stop()
+    test_rebuild_limit_stops_runaway_retries()
     _TMP.cleanup()
     print("\n全部通过 ✔")
     return 0

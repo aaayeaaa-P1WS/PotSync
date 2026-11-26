@@ -104,7 +104,11 @@ def _parse_github_release(data: dict) -> UpdateInfo:
         elif name.endswith(".exe"):
             exe_urls.append(dl)
     pot = [u for u in exe_urls if "potsync" in u.lower()]
-    url = (pot or exe_urls or [""])[0]      # 优先名字含 potsync 的 exe
+    # 2.5.0 起发布资产改名为 PotSync-<版本>.exe；旧版仍能找到带 potsync 的 exe，
+    # 所以新老命名都能识别，优先挑文件名里带本版本号的那个。
+    ver_digits = "".join(ch for ch in version if ch.isdigit())
+    versioned = [u for u in pot if ver_digits and ver_digits in u]
+    url = (versioned or pot or exe_urls or [""])[0]
     if not version or not url:
         raise ValueError("Release 中未找到版本号或 exe 资产")
     return UpdateInfo(version, url, str(data.get("body", "")),

@@ -54,6 +54,7 @@ RACE_VERIFY_S = 14.0          # 竞速时拿到地址后最多校验多久
 RACE_TOTAL_S = 36.0
 RACE_HTTPS_GRACE = 3.0           # TCP 兜底前等 HTTPS 入口的时间上限
 RACE_HTTPS_GRACE_PENDING = 6.0   # 已拿到 HTTPS 地址、正在校验时的宽限
+REBUILD_LIMIT = 4               # 看护线程自动重建次数上限，超过就停手等用户点重试
 
 CLOUDFLARED_URL = ("https://github.com/cloudflare/cloudflared/releases/"
                    "latest/download/cloudflared-windows-amd64.exe")
@@ -386,7 +387,9 @@ class TunnelManager:
 
         self._local_port = 0
         self._preferred: Optional[str] = None
-        self._watching = False
+        self._watch_thread: Optional[threading.Thread] = None
+        self._gen = 0
+        self._rebuilds = 0
         self._live: dict = {}
         self._errors: list = []
         self._thread: Optional[threading.Thread] = None
@@ -405,21 +408,29 @@ class TunnelManager:
         """
         if self._thread and self._thread.is_alive():
             return
-        self._stopped.clear()
+        self._gen += 1
+        self._stopped = threading.Event()
         self.endpoint = None
         self._errors = []
+        self._rebuilds = 0
         self._local_port = local_port
         self._preferred = preferred
+        gen = self._gen
         self._thread = threading.Thread(
             target=self._run, args=(local_port, preferred),
             name="potsync-tunnel", daemon=True)
         self._thread.start()
-        if not self._watching:
-            self._watching = True
-            threading.Thread(target=self._watch, args=(local_port,),
-                             name="potsync-tunnel-watch", daemon=True).start()
+        watcher = self._watch_thread
+        if watcher is None or not watcher.is_alive():
+            self._watch_thread = threading.Thread(
+                target=self._watch, args=(gen, local_port),
+                name="potsync-tunnel-watch", daemon=True)
+            self._watch_thread.start()
 
     def stop(self) -> None:
+        # 换代 + 置停止位：旧看护线程看到 gen 变化或 stopped 就会退出，
+        # 不会在用户离开房间之后继续后台重建通道。
+        self._gen += 1
         self._stopped.set()
         for name, proc in list(self._live.items()):
             self._terminate_process(proc)
@@ -430,16 +441,28 @@ class TunnelManager:
         self._proc = None
         self._winner_proc = None
         self.endpoint = None
+        watcher = self._watch_thread
+        if watcher is not None and watcher is not threading.current_thread():
+            watcher.join(0.8)
+        self._watch_thread = None
+
+    def reset_rebuilds(self) -> None:
+        """用户主动点「重试公网」时重置自动重建计数。"""
+        self._rebuilds = 0
 
     # ---------- 内部 ----------
 
-    def _watch(self, local_port: int) -> None:
-        """公网通道进程掉线时自动重建（pinggy 60 分钟过期、网络切换等）。"""
+    def _watch(self, gen: int, local_port: int) -> None:
+        """公网通道进程掉线时自动重建（pinggy 60 分钟过期、网络切换等）。
+
+        gen 是本轮 start() 的代号：stop() 会 +1，线程发现代号不符立即退出，
+        避免「已经离开房间了还在后台不停重建通道」。
+        """
         import time as _time
         down_since = 0.0
-        while not self._stopped.is_set():
+        while gen == self._gen and not self._stopped.is_set():
             _time.sleep(3.0)
-            if self._stopped.is_set():
+            if gen != self._gen or self._stopped.is_set():
                 return
             if self.endpoint is None:
                 down_since = 0.0
@@ -459,7 +482,12 @@ class TunnelManager:
                 continue
             if self._thread is not None and self._thread.is_alive():
                 continue
-            log.info("重建公网通道（local_port=%s）", local_port)
+            if self._rebuilds >= REBUILD_LIMIT:
+                log.warning("自动重建已失败 %s 次，停止重试", self._rebuilds)
+                self._on_error("公网入口多次重建失败，请检查网络后点「重试公网」")
+                return
+            self._rebuilds += 1
+            log.info("重建公网通道（第 %s 次，local_port=%s）", self._rebuilds, local_port)
             self.endpoint = None
             self._winner_proc = None
             self._thread = threading.Thread(

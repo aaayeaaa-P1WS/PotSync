@@ -367,6 +367,19 @@ class NetClient(QObject):
         self._token = ""
         self._call(self._send({"type": MSG_LEAVE}))
 
+    def disconnect(self) -> None:
+        """主动断开并结束重连循环（离开房间、换服务器时用）。
+
+        必须先把 _local_close 置位：否则 _main 会把这次断开当成意外掉线，
+        继续按 0.5→30s 退避无限重连，界面就一直卡在「重连中」。
+        """
+        self._running = False
+        self._local_close = True
+        self._call(self._close())
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(1.5)
+
     # ---------- 接收分发 ----------
 
     def _on_raw(self, raw) -> None:

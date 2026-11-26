@@ -897,6 +897,9 @@ class MainWindow(QMainWindow):
     def _leave_room(self) -> None:
         self._stop_tunnel()
         self.net.leave_room()
+        # 关键：这里必须彻底断开并结束重连循环，否则退出房间后网络线程还会
+        # 一直按退避重连，界面永远停在「重连中」，也没法再建新房。
+        self.net.disconnect()
         self.engine.leave_room()
         self.room_code = ""
         self._update_reach()

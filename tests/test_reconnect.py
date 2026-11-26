@@ -243,6 +243,30 @@ def run_token_expiry_test() -> None:
     print("PASS  [过期] 身份失效后自动重新加入房间（新身份），未掉回主页")
 
 
+def test_disconnect_stops_reconnect_loop():
+    """用户主动离开房间后，网络线程必须停下，不许无限重连。"""
+    net = NetClient()
+    attempts = []
+    net.sigConnecting.connect(lambda a, d: attempts.append(a))
+
+    async def boom(uri, proxy=None):
+        raise OSError("模拟连接失败")
+
+    net._session = boom
+    net._choose_proxy = lambda host, uri: ""
+    try:
+        net.connect_to("127.0.0.1", 1, "测试")
+        wait_for(lambda: len(attempts) >= 2, 12)
+        assert len(attempts) >= 2, f"没有进入重连循环：{attempts}"
+        net.disconnect()
+        settled = len(attempts)
+        time.sleep(2.5)
+        assert len(attempts) == settled, f"disconnect 之后仍在重连：{attempts[settled:]}"
+    finally:
+        net.shutdown()
+    print("PASS  主动断开后不再重连")
+
+
 def main() -> int:
     global proxy, proxy2
     proc = subprocess.Popen(
@@ -261,6 +285,7 @@ def main() -> int:
         assert wait_port(PROXY2_PORT), "代理 2 启动失败"
         run_test()
         run_token_expiry_test()
+        test_disconnect_stops_reconnect_loop()
         print("\n全部通过 ✔")
         return 0
     finally:

@@ -247,12 +247,32 @@ QPushButton#copyLinkBtn:disabled {
     font-weight: 400;
 }
 
+/* 房间页同一排的三个按钮：统一盒模型，保证文字基线对齐 */
+QPushButton#copyLinkBtn,
+QPushButton#dangerBtn,
+QPushButton#retryTunnelBtn {
+    min-height: 30px;
+    max-height: 30px;
+    padding: 0 14px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+QPushButton#retryTunnelBtn {
+    background: $surface_alt_a;
+    color: $text;
+    border: 1px solid $border;
+    border-radius: $radius_small;
+}
+QPushButton#retryTunnelBtn:hover {
+    background: $surface_hover_a;
+    border-color: $border_strong;
+}
+
 QPushButton#dangerBtn {
     background: $danger_solid;
     color: $on_danger;
     border: 1px solid $danger_solid;
-    font-weight: 600;
-    padding: 6px 14px;
 }
 
 QPushButton#dangerBtn:hover {
@@ -268,7 +288,6 @@ QPushButton#dangerBtn:pressed {
 
 QPushButton#dangerBtn:focus {
     border: 2px solid $on_danger;
-    padding: 5px 13px;
 }
 
 QPushButton#dangerBtn:disabled {

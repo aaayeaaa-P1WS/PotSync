@@ -262,16 +262,26 @@ def main() -> int:
         assert '$bak = "$old.bak"' in body, "先改名留底再顶替"
         assert "Move-Item -LiteralPath $bak -Destination $old -Force" in body, "失败要回滚"
         assert "-WorkingDirectory $dir" in body, "启动时指定工作目录"
-        assert "Start-Sleep -Seconds 8" in body, "启动后观察稳定性"
+        assert "Start-Sleep -Seconds 10" in body, "启动后观察 10 秒稳定性"
+        assert "Get-FileHash" in body, "复制与顶替后都要做哈希校验"
+        assert "Restore-Backup" in body, "启动失败或校验不一致要回滚旧版本"
+        assert "Unblock-File" in body, "下载文件要先去掉网络来源标记"
+        assert "$waits = @(3, 6, 10, 15)" in body, "启动失败要多次退避重试"
         assert "MessageBox" in body, "失败要有可见提示"
         assert script.read_bytes().startswith(bytes([0xEF, 0xBB, 0xBF])), "PS 5.1 需要 BOM"
     finally:
         script.unlink(missing_ok=True)
-    print("PASS  make_update_script（PID 等待 / 复制→改名顶替→回滚 / 工作目录 / 稳定性观察 / 失败提示）")
+    print("PASS  make_update_script（PID 等待 / 哈希校验 / 改名顶替与回滚 / 多次退避重启 / 失败提示）")
 
     assert updater.update_log_path().name == "update.log"
     assert updater.updates_dir().name == "updates"
     print("PASS  更新日志与安装包目录约定")
+
+    print("PASS  launch_flags（CREATE_NO_WINDOW / 不用 DETACHED_PROCESS）")
+    flags = updater.launch_flags()
+    assert flags & 0x08000000, "缺少 CREATE_NO_WINDOW"
+    assert not flags & 0x00000008, "不能使用 DETACHED_PROCESS"
+    assert flags & 0x00000200, "应该带 CREATE_NEW_PROCESS_GROUP"
 
     print("\n全部通过 ✔")
     return 0

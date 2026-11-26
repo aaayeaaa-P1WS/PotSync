@@ -55,16 +55,16 @@ def build_room(window) -> QWidget:
     top.addLayout(col, 1)
 
     window.btnRetryTunnel = QPushButton("重试公网")
-    window.btnRetryTunnel.setObjectName("smallBtn")
-    window.btnRetryTunnel.setMinimumHeight(32)
+    window.btnRetryTunnel.setObjectName("retryTunnelBtn")
+    window.btnRetryTunnel.setFixedHeight(32)
     window.btnRetryTunnel.setCursor(Qt.PointingHandCursor)
     window.btnRetryTunnel.setVisible(False)
     window.btnRetryTunnel.clicked.connect(window._retry_tunnel)
-    top.addWidget(window.btnRetryTunnel, 0, Qt.AlignBottom)
+    top.addWidget(window.btnRetryTunnel, 0, Qt.AlignBottom | Qt.AlignVCenter)
 
     window.btnCopyLink = QPushButton("复制邀请链接")
     window.btnCopyLink.setObjectName("copyLinkBtn")
-    window.btnCopyLink.setMinimumHeight(32)
+    window.btnCopyLink.setFixedHeight(32)
     window.btnCopyLink.setCursor(Qt.PointingHandCursor)
     # 默认禁用：主机模式要等公网入口稳定后才允许复制，避免发出局域网链接。
     window.btnCopyLink.setEnabled(False)
@@ -72,11 +72,11 @@ def build_room(window) -> QWidget:
     window.btnCopyLink.clicked.connect(window._copy_invite_link)
     window.btnLeave = QPushButton("离开房间")
     window.btnLeave.setObjectName("dangerBtn")
-    window.btnLeave.setMinimumHeight(32)
+    window.btnLeave.setFixedHeight(32)
     window.btnLeave.setCursor(Qt.PointingHandCursor)
     window.btnLeave.clicked.connect(window._leave_room)
-    top.addWidget(window.btnCopyLink, 0, Qt.AlignBottom)
-    top.addWidget(window.btnLeave, 0, Qt.AlignBottom)
+    top.addWidget(window.btnCopyLink, 0, Qt.AlignBottom | Qt.AlignVCenter)
+    top.addWidget(window.btnLeave, 0, Qt.AlignBottom | Qt.AlignVCenter)
     v.addLayout(top)
 
     # ---------------- 中部：成员 | 正在播放

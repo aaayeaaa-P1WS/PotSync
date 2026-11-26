@@ -249,18 +249,39 @@ def make_update_script(current_exe: Path, new_exe: Path,
             .replace("@@NEW_EXE@@", _ps_escape(new_exe))
             .replace("@@OLD_PID@@", str(int(old_pid or 0)))
             .replace("@@LOG_PATH@@", _ps_escape(update_log_path())))
-    script_path = Path(tempfile.gettempdir()) / "potsync_update.ps1"
+    # 用唯一文件名：以前固定写 potsync_update.ps1，若上一次更新的脚本还没退出
+    # （比如正停在失败提示框上），新脚本会覆盖它、或者两个实例互相踩踏，
+    # 表现就是"点了更新没反应、日志里也没有新记录"。
+    fd, name = tempfile.mkstemp(prefix="potsync_update_", suffix=".ps1")
+    os.close(fd)
+    script_path = Path(name)
     # PowerShell 5.1 按 BOM 判断 UTF-8；没有 BOM 中文会变乱码
     script_path.write_text(body, encoding="utf-8-sig")
     return script_path
+
+
+def launch_flags() -> int:
+    """拉起更新脚本时使用的创建标志（Windows）。
+
+    为什么不是 DETACHED_PROCESS：PowerShell 5.1 在没有控制台的分离进程里执行
+    `-File` 会立刻静默退出，脚本一行都不跑，update.log 也没有任何记录，用户看到
+    的就是「点了更新没反应，重启后还是旧版本」。CREATE_NO_WINDOW 只隐藏窗口，
+    脚本能正常执行，也不会闪黑框。
+    """
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return int(create_no_window) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 
 def apply_and_restart(current_exe: Path, new_exe: Path,
                       old_pid: Optional[int] = None) -> None:
     """启动更新脚本（调用方随后应立即退出本程序）。"""
     script = make_update_script(current_exe, new_exe, old_pid)
-    flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
-             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    # 关键：这里绝对不能用 DETACHED_PROCESS。
+    # PowerShell 5.1 在 DETACHED_PROCESS 下没有可用控制台，-File 脚本会静默退出：
+    # 进程立刻结束、脚本一行都没执行、update.log 也不会有任何记录，表现为
+    # “点了更新没反应 / 重启后还是旧版本”。CREATE_NO_WINDOW 则只隐藏控制台窗口，
+    # 脚本正常执行且不会闪出黑框。
+    flags = launch_flags()
     subprocess.Popen(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
          "-WindowStyle", "Hidden", "-File", str(script)],

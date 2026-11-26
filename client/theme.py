@@ -194,8 +194,10 @@ class Palette:
         # 浅色下不能直接用 surface_alt（接近白色），所以单独给一层半透明灰。
         # 危险操作用实心红 + 近黑文字（Win11 的删除类强调色），两个主题都保证对比度
         if self.mode == "light":
-            data["danger_solid"] = "#ef1b2d"
-            data["danger_solid_hover"] = "#f4323f"
+            # 浅色下之前用 #ef1b2d，饱和度太高很扎眼；压暗到 #d93a2e，
+            # 黑字对比度仍有 4.60:1（WCAG AA 要求 4.5），观感更接近 Win11 的克制红。
+            data["danger_solid"] = "#d93a2e"
+            data["danger_solid_hover"] = "#c5362b"
         else:
             data["danger_solid"] = "#ff7a7a"
             data["danger_solid_hover"] = "#ff8f8f"
